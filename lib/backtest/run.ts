@@ -11,23 +11,36 @@ type EventRow = {
   timezone: string;
 };
 
-export async function executeBacktest(from: string, to: string) {
+export type BacktestRunOptions = {
+  stations?: string[];
+  jobId?: string;
+  onProgress?: (progress: { current: number; total: number; signals: number }) => Promise<void>;
+  shouldContinue?: () => Promise<boolean>;
+};
+
+export async function executeBacktest(
+  from: string,
+  to: string,
+  options: BacktestRunOptions = {},
+) {
   if (!pool) throw new Error("DATABASE_URL is required for backtesting");
   const startedAt = new Date().toISOString();
   const runResult = await pool.query<{ id: string }>(
     `INSERT INTO backtest_runs
-      (name, model_version, started_at, as_of_start, as_of_end, config, status)
-     VALUES ('Mechanical receipt-to-reprice', 'latency-v0.1.0', $1, $2::date, ($3::date + interval '1 day'), $4, 'running')
+      (name, model_version, started_at, as_of_start, as_of_end, config, status, job_id)
+     VALUES ('Mechanical receipt-to-reprice', 'latency-v0.1.0', $1, $2::date,
+             ($3::date + interval '1 day'), $4, 'running', $5)
      RETURNING id`,
-    [startedAt, from, to, DEFAULT_ENGINE_CONFIG],
+    [startedAt, from, to, { ...DEFAULT_ENGINE_CONFIG, stations: options.stations ?? [] }, options.jobId ?? null],
   );
   const runId = Number(runResult.rows[0].id);
   const eventResult = await pool.query<EventRow>(
     `SELECT e.event_ticker, e.station_code, e.trade_date::text, s.timezone
-       FROM market_events e JOIN stations s USING (station_code)
+      FROM market_events e JOIN stations s USING (station_code)
       WHERE e.trade_date BETWEEN $1::date AND $2::date
+        AND ($3::text[] IS NULL OR e.station_code = ANY($3::text[]))
       ORDER BY e.trade_date, e.station_code`,
-    [from, to],
+    [from, to, options.stations?.length ? options.stations : null],
   );
 
   let signalCount = 0;
@@ -36,9 +49,14 @@ export async function executeBacktest(from: string, to: string) {
   let resolved = 0;
   let gross = 0;
   let fees = 0;
+  let processed = 0;
 
   try {
+    await options.onProgress?.({ current: 0, total: eventResult.rowCount ?? 0, signals: 0 });
     for (const event of eventResult.rows) {
+      if (options.shouldContinue && !(await options.shouldContinue())) {
+        throw new Error("JOB_CONTROLLED_STOP");
+      }
       const contractResult = await pool.query<{
         ticker: string; label: string; lower_bound_f: string | null; upper_bound_f: string | null; result: "yes" | "no" | "unknown";
       }>(
@@ -54,7 +72,15 @@ export async function executeBacktest(from: string, to: string) {
         result: row.result,
       }));
       const tickers = contracts.map((contract) => contract.ticker);
-      if (!tickers.length) continue;
+      if (!tickers.length) {
+        processed += 1;
+        await options.onProgress?.({
+          current: processed,
+          total: eventResult.rowCount ?? 0,
+          signals: signalCount,
+        });
+        continue;
+      }
 
       const observationResult = await pool.query<{
         station_code: string; source: string; report_type: ObservationPoint["reportType"];
@@ -135,6 +161,12 @@ export async function executeBacktest(from: string, to: string) {
         if (grossProfit !== null) gross += grossProfit;
         if (fee !== null) fees += fee;
       }
+      processed += 1;
+      await options.onProgress?.({
+        current: processed,
+        total: eventResult.rowCount ?? 0,
+        signals: signalCount,
+      });
     }
     const summary = {
       events: eventResult.rowCount,

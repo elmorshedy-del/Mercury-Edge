@@ -1,13 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authorized } from "@/lib/auth";
 import { pool } from "@/lib/db";
-import { executeBacktest } from "@/lib/backtest/run";
-
-export const maxDuration = 60;
-
-function authorized(request: NextRequest) {
-  const token = process.env.INGEST_TOKEN;
-  return Boolean(token && request.headers.get("authorization") === `Bearer ${token}`);
-}
+import { createJob } from "@/lib/jobs/repository";
+import { validateJobParameters } from "@/lib/jobs/validation";
 
 export async function GET() {
   if (!pool) return NextResponse.json({ mode: "verified_demo", runs: [] });
@@ -21,10 +16,12 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   if (!authorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const body = await request.json() as { from?: string; to?: string };
-  if (!body.from || !/^\d{4}-\d{2}-\d{2}$/.test(body.from)) {
-    return NextResponse.json({ error: "from must be YYYY-MM-DD" }, { status: 400 });
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const parameters = validateJobParameters(body);
+    const jobId = await createJob("backtest", parameters);
+    return NextResponse.json({ jobId, status: "queued" }, { status: 202 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }
-  const summary = await executeBacktest(body.from, body.to ?? body.from);
-  return NextResponse.json(summary);
 }

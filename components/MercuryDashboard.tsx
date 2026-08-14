@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { STATIONS } from "@/lib/config";
 import type { CaseStudy, DashboardPayload, EdgeClass } from "@/lib/types";
 import { Alert, ArrowUpRight, Check, Database, Mark } from "./Icons";
+import { ResearchControl } from "./ResearchControl";
 
 const FILTERS: Array<{ value: "all" | EdgeClass; label: string; short: string }> = [
   { value: "all", label: "All evidence", short: "All" },
@@ -187,6 +188,7 @@ export function MercuryDashboard({ initialData }: { initialData: DashboardPayloa
       <header className="nav shell">
         <a className="brand" href="#top" aria-label="Mercury Edge home"><Mark /><span>Mercury <b>Edge</b></span></a>
         <nav>
+          <a href="#control">Control</a>
           <a href="#evidence">Evidence</a>
           <a href="#coverage">Coverage</a>
           <a href="#method">Method</a>
@@ -238,6 +240,8 @@ export function MercuryDashboard({ initialData }: { initialData: DashboardPayloa
           <Metric label="Illustrative gross" value={money(initialData.headline.grossProfitCents)} note="Observed examples; not a portfolio return" />
         </div>
       </section>
+
+      <ResearchControl />
 
       <section className="section shell" id="evidence">
         <div className="sectionIntro">

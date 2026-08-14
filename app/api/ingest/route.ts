@@ -1,13 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authorized } from "@/lib/auth";
 import { STATIONS } from "@/lib/config";
 import { ingestAll } from "@/lib/ingest";
 
 export const maxDuration = 60;
-
-function authorized(request: NextRequest) {
-  const token = process.env.INGEST_TOKEN;
-  return Boolean(token && request.headers.get("authorization") === `Bearer ${token}`);
-}
 
 export async function POST(request: NextRequest) {
   if (!authorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
