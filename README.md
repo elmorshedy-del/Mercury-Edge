@@ -67,6 +67,8 @@ npm run check
 
 The Docker image applies idempotent SQL migrations before starting the Next.js server. Protected write routes require `Authorization: Bearer $INGEST_TOKEN`.
 
+The live worker uses a 20-minute candle overlap and fetches only newly discovered NWS product bodies. Database constraints deduplicate the overlap, preserving continuity after a brief provider or worker outage.
+
 ## HTTP API
 
 - `GET /api/health` — web and database status.

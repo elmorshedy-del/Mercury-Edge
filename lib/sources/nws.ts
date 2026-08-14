@@ -70,10 +70,13 @@ export async function getProducts(
   location: string,
   timezone: string,
   limit = 8,
+  knownProductIds: ReadonlySet<string> = new Set(),
 ): Promise<ParsedProduct[]> {
   const indexUrl = `${NWS_BASE_URL}/products/types/${productType}/locations/${location}`;
   const index = await fetchJson<ProductIndex>(indexUrl);
-  const items = index["@graph"].slice(0, limit);
+  const items = index["@graph"]
+    .slice(0, limit)
+    .filter((item) => !knownProductIds.has(item.id));
   const results: ParsedProduct[] = [];
 
   for (const item of items) {

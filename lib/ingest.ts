@@ -116,7 +116,19 @@ export async function ingestStation(station: StationConfig, at = new Date()): Pr
   if (station.nwsLocation) {
     for (const productType of ["DSM", "CLI"] as const) {
       try {
-        const products = await getProducts(productType, station.nwsLocation, station.timezone, 4);
+        const known = await pool.query<{ product_id: string }>(
+          `SELECT product_id FROM product_releases
+            WHERE station_code=$1 AND product_type=$2
+            ORDER BY issued_at DESC LIMIT 12`,
+          [station.station, productType],
+        );
+        const products = await getProducts(
+          productType,
+          station.nwsLocation,
+          station.timezone,
+          4,
+          new Set(known.rows.map((row) => row.product_id)),
+        );
         await transaction(async (client) => {
           for (const product of products) {
             await client.query(
@@ -180,7 +192,9 @@ export async function ingestStation(station: StationConfig, at = new Date()): Pr
     result.events = 1;
     result.contracts = markets.length;
 
-    const candleStart = new Date(at.getTime() - 6 * 60 * 60 * 1000);
+    // A 20-minute overlap survives short outages while avoiding a full-day
+    // candle download on every minute-level worker cycle.
+    const candleStart = new Date(at.getTime() - 20 * 60 * 1000);
     for (const market of markets) {
       const candles = await getMinuteCandles(station.kalshiSeries, market.ticker, candleStart, at);
       await transaction(async (client) => {
