@@ -49,9 +49,9 @@ export async function getDashboard(): Promise<DashboardPayload> {
             mc.label, e.final_value_f, e.settlement_source_name,
             e.settlement_source_url, bs.outcome
        FROM backtest_signals bs
-       JOIN market_events e USING (event_ticker)
-       JOIN market_contracts mc USING (contract_ticker)
-       JOIN stations s USING (station_code)
+       JOIN market_events e ON e.event_ticker = bs.event_ticker
+       JOIN market_contracts mc ON mc.ticker = bs.contract_ticker
+       JOIN stations s ON s.station_code = bs.station_code
       WHERE bs.run_id=$1
       ORDER BY bs.triggered_at DESC`,
     [runId],
