@@ -62,7 +62,7 @@ npm run check
 2. Add a PostgreSQL service; Railway supplies `DATABASE_URL` to linked services.
 3. Set `INGEST_TOKEN`, `SOURCE_USER_AGENT`, and `LIVE_INGEST_ENABLED=0` on the web service.
 4. Deploy the web service using the included `Dockerfile` and `/api/health` health check.
-5. Add a second service from the same repository with start command `npm run worker`. Set `LIVE_INGEST_ENABLED=1`, `POLL_INTERVAL_MS=60000`, and `INGEST_STATIONS=KNYC,KPHL` only on that worker.
+5. Add a second service from the same repository using `railway.worker.json`. Set `LIVE_INGEST_ENABLED=1`, `POLL_INTERVAL_MS=60000`, and `INGEST_STATIONS=KNYC,KPHL` only on that worker.
 6. Expand `INGEST_STATIONS` only after checking provider rate limits and Railway resource use. All 20 mappings remain available without forcing all 20 probes to run each minute.
 
 The Docker image applies idempotent SQL migrations before starting the Next.js server. Protected write routes require `Authorization: Bearer $INGEST_TOKEN`.
