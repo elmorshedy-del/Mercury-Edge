@@ -18,6 +18,8 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
+COPY --from=builder /app/lib ./lib
 COPY --from=builder /app/sql ./sql
 COPY --from=builder /app/scripts ./scripts
 EXPOSE 3000
