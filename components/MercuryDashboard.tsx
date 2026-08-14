@@ -58,6 +58,19 @@ function dateLabel(timestamp: string) {
   }).format(new Date(`${timestamp}T12:00:00Z`));
 }
 
+function generatedLabel(timestamp: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(timestamp));
+}
+
 function Metric({ label, value, note, accent = false }: { label: string; value: string; note: string; accent?: boolean }) {
   return (
     <div className={`metric ${accent ? "metricAccent" : ""}`}>
@@ -227,7 +240,7 @@ export function MercuryDashboard({ initialData }: { initialData: DashboardPayloa
               <div className="radarCenter"><small>Median<br />reaction</small><strong>{seconds(initialData.headline.medianMarketReactionSeconds)}</strong></div>
               <span className="radarLabel l1">Observed</span><span className="radarLabel l2">Published</span><span className="radarLabel l3">Ingested</span><span className="radarLabel l4">Repriced</span>
             </div>
-            <div className="instrumentFooter"><span>Generated</span><time>{new Date(initialData.generatedAt).toLocaleString()}</time></div>
+            <div className="instrumentFooter"><span>Generated</span><time>{generatedLabel(initialData.generatedAt)}</time></div>
           </div>
         </div>
       </section>
