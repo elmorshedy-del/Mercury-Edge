@@ -3,38 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { STATIONS } from "@/lib/config";
 import type { JobControlAction, ResearchJob, ResearchJobStatus } from "@/lib/jobs/types";
+import { BacktestReport, type ResultsPayload } from "./BacktestReport";
 import { Alert, Check, Database } from "./Icons";
-
-type ResultsPayload = {
-  generatedAt?: string;
-  latestRun: null | {
-    id: number;
-    modelVersion: string;
-    finishedAt: string | null;
-    summary: Record<string, unknown>;
-  };
-  stations: Array<{
-    station: string;
-    signals: number;
-    executable: number;
-    resolved: number;
-    wins: number;
-    winRate: number | null;
-    averageLagSeconds: number | null;
-    grossProfit: number | null;
-    netProfit: number | null;
-  }>;
-  coverage: Array<{
-    station: string;
-    firstObservation: string | null;
-    lastObservation: string | null;
-    observations: number;
-    actualReceipts: number;
-    discoveryOnly: number;
-    marketDays: number;
-    quotes: number;
-  }>;
-};
 
 type JobDetail = {
   job: ResearchJob;
@@ -62,17 +32,6 @@ function defaultRange() {
   return { from: isoDate(from), to: isoDate(to) };
 }
 
-function fmtNumber(value: unknown, digits = 0) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: digits }) : "—";
-}
-
-function fmtSeconds(value: number | null) {
-  if (value === null) return "—";
-  if (value < 60) return `${Math.round(value)}s`;
-  return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s`;
-}
-
 function fmtTime(value: string | null) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
@@ -92,7 +51,7 @@ export function ResearchControl() {
   const [to, setTo] = useState(range.to);
   const [stations, setStations] = useState<string[]>(["KNYC", "KPHL"]);
   const [jobs, setJobs] = useState<ResearchJob[]>([]);
-  const [results, setResults] = useState<ResultsPayload>({ latestRun: null, stations: [], coverage: [] });
+  const [results, setResults] = useState<ResultsPayload>({ latestRun: null, stations: [], signals: [], coverage: [] });
   const [tokenInput, setTokenInput] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -186,14 +145,15 @@ export function ResearchControl() {
   }
 
   const activeJobs = jobs.filter((job) => ACTIVE.has(job.status)).length;
-  const latestSummary = results.latestRun?.summary ?? {};
   const unlocked = Boolean(token);
 
   return (
     <section className="controlSection" id="control">
       <div className="shell">
+        <BacktestReport results={results} />
+
         <div className="controlHeader">
-          <div><span className="kicker">Research control plane</span><h2>Run it here.<br />Audit every step.</h2></div>
+          <div><span className="kicker">Research controls</span><h2>Run it here.<br />Audit every step.</h2></div>
           <div className="controlHeartbeat"><i className={activeJobs ? "active" : ""} /><span>{activeJobs ? `${activeJobs} active job${activeJobs === 1 ? "" : "s"}` : "Worker standing by"}</span><small>refreshes every 5 seconds</small></div>
         </div>
 
@@ -239,22 +199,6 @@ export function ResearchControl() {
               </div>;
             })}{!jobs.length && <div className="emptyJobs"><Database /><strong>No database-controlled jobs yet</strong><span>Configure a range, unlock controls, then queue the first pipeline.</span></div>}</div>
           </div>
-        </div>
-
-        <div className="resultsWorkbench">
-          <div className="resultsHeader"><div><span>Latest completed model run</span><h3>Backtest results</h3></div><small>{results.latestRun ? `${results.latestRun.modelVersion} · ${fmtTime(results.latestRun.finishedAt)}` : "Waiting for first controlled run"}</small></div>
-          <div className="resultMetrics">
-            <div><span>Events evaluated</span><strong>{fmtNumber(latestSummary.events)}</strong></div>
-            <div><span>Signals</span><strong>{fmtNumber(latestSummary.signals)}</strong></div>
-            <div><span>Executable proxies</span><strong>{fmtNumber(latestSummary.executableSignals)}</strong></div>
-            <div><span>Win rate</span><strong>{latestSummary.winRate === null || latestSummary.winRate === undefined ? "—" : `${fmtNumber(Number(latestSummary.winRate) * 100, 1)}%`}</strong></div>
-            <div><span>Net / one-contract rule</span><strong>{latestSummary.netProfitPerOneContract === undefined ? "—" : `$${fmtNumber(latestSummary.netProfitPerOneContract, 2)}`}</strong></div>
-          </div>
-          <div className="resultsTables">
-            <div><h4>Station performance</h4><div className="miniTable"><div className="miniHead"><span>Station</span><span>Signals</span><span>Executable</span><span>Win rate</span><span>Avg lag</span><span>Net</span></div>{results.stations.map((row) => <div key={row.station}><span><b>{row.station}</b></span><span>{row.signals}</span><span>{row.executable}</span><span>{row.winRate === null ? "—" : `${fmtNumber(row.winRate * 100, 1)}%`}</span><span>{fmtSeconds(row.averageLagSeconds)}</span><span>{row.netProfit === null ? "—" : `$${fmtNumber(row.netProfit, 2)}`}</span></div>)}{!results.stations.length && <p>No completed signal set yet.</p>}</div></div>
-            <div><h4>Stored-data coverage</h4><div className="miniTable coverageMini"><div className="miniHead"><span>Station</span><span>Market days</span><span>Observations</span><span>Actual receipts</span><span>Quotes</span></div>{results.coverage.map((row) => <div key={row.station}><span><b>{row.station}</b></span><span>{row.marketDays}</span><span>{row.observations.toLocaleString()}</span><span>{row.actualReceipts.toLocaleString()}</span><span>{row.quotes.toLocaleString()}</span></div>)}{!results.coverage.length && <p>Coverage appears after ingestion writes its first records.</p>}</div></div>
-          </div>
-          <p className="resultsCaveat"><Alert /> Backtest outputs remain quote proxies. The audit keeps original receipt quality, failed items, retries, fees, and non-executable evidence visible.</p>
         </div>
       </div>
     </section>
