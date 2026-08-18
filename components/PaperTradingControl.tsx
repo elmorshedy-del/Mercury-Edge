@@ -271,7 +271,7 @@ export function PaperTradingControl() {
               };
               return (
                 <div className={styles.strategy} key={strategy.strategyCode}>
-                  <div><strong>{strategy.strategyCode} · {strategy.displayName}</strong><small>{strategy.family}{strategy.realMoneyEligible ? " · Phase-1 eligible" : " · research"}</small></div>
+                  <div><strong>{strategy.displayName} ({strategy.strategyCode})</strong><small>{strategy.family}{strategy.realMoneyEligible ? " · Phase-1 eligible" : " · research"}</small></div>
                   <div className={styles.checks}>
                     <label><input type="checkbox" checked={draft.paperTradeEnabled} onChange={(e) => setStrategyDrafts((old) => ({ ...old, [strategy.strategyCode]: { ...draft, paperTradeEnabled: e.target.checked } }))} /> trade</label>
                     <label><input type="checkbox" checked={draft.shadowEnabled} onChange={(e) => setStrategyDrafts((old) => ({ ...old, [strategy.strategyCode]: { ...draft, shadowEnabled: e.target.checked } }))} /> shadow</label>
