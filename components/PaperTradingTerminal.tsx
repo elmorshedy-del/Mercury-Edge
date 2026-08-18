@@ -57,9 +57,13 @@ type ExecutionTrade = {
   portfolioId: string | null;
   modeCode: string | null;
   strategyCode: string;
+  strategyName: string | null;
   stationCode: string;
   eventTicker: string | null;
   marketTicker: string;
+  contractLabel: string | null;
+  lowerBoundF: number | null;
+  upperBoundF: number | null;
   side: "yes" | "no";
   status: "filled" | "partial";
   requestedQty: number;
@@ -122,6 +126,22 @@ function lag(value: number | null) {
   if (value === null) return "—";
   if (value < 60) return `${value}s`;
   return `${Math.floor(value / 60)}m ${value % 60}s`;
+}
+
+function strategyLabel(trade: ExecutionTrade) {
+  return trade.strategyName ? `${trade.strategyName} (${trade.strategyCode})` : trade.strategyCode;
+}
+
+function bucketLabel(trade: ExecutionTrade) {
+  if (trade.contractLabel) return trade.contractLabel;
+  if (trade.lowerBoundF !== null && trade.upperBoundF !== null) {
+    return trade.lowerBoundF === trade.upperBoundF
+      ? `${trade.lowerBoundF}°F`
+      : `${trade.lowerBoundF}–${trade.upperBoundF}°F`;
+  }
+  if (trade.lowerBoundF !== null) return `${trade.lowerBoundF}°F or above`;
+  if (trade.upperBoundF !== null) return `${trade.upperBoundF}°F or below`;
+  return trade.marketTicker;
 }
 
 export function PaperTradingTerminal() {
@@ -325,7 +345,7 @@ export function PaperTradingTerminal() {
             </div>
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <thead><tr><th>Time</th><th>Station</th><th>Market</th><th>Strategy</th><th>Side</th><th>In</th><th>Out / mark</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
+                <thead><tr><th>Time</th><th>Station</th><th>Bucket</th><th>Strategy</th><th>Side</th><th>In</th><th>Out / mark</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
                 <tbody>
                   {takenTrades.map((trade) => {
                     const closed = trade.positionStatus === "closed" || trade.positionStatus === "settled";
@@ -333,8 +353,8 @@ export function PaperTradingTerminal() {
                       <tr key={trade.id}>
                         <td>{clock(trade.decisionAt)}</td>
                         <td><b>{trade.stationCode}</b><small>{trade.eventTicker ?? "—"}</small></td>
-                        <td><b>{trade.marketTicker}</b><small>{trade.modeCode ?? "unassigned"}</small></td>
-                        <td>{trade.strategyCode}</td>
+                        <td><b>{bucketLabel(trade)}</b><small>{trade.marketTicker} · {trade.modeCode ?? "unassigned"}</small></td>
+                        <td><b>{strategyLabel(trade)}</b></td>
                         <td><span className={styles.signalSide}>{trade.side.toUpperCase()}</span></td>
                         <td><b>{priceCents(trade.entryPrice)}</b><small>avg fill</small></td>
                         <td><b>{closed ? priceCents(trade.lastMark) : "—"}</b><small>{closed ? trade.positionStatus : trade.lastMark === null ? "open" : `mark ${priceCents(trade.lastMark)}`}</small></td>
