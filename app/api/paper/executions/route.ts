@@ -31,6 +31,107 @@ type ExecutionRow = {
   last_mark: string | null;
 };
 
+type JournalRow = {
+  market_ticker: string;
+  id: string;
+  channel: "orderbook_snapshot" | "orderbook_delta";
+  received_at: Date;
+  exchange_ts_ms: string | null;
+  raw_text: string;
+  price_mode: string | null;
+};
+
+type LiveMark = {
+  yesBid: number | null;
+  noBid: number | null;
+  receivedAt: string;
+  exchangeAt: string | null;
+};
+
+function nativePrice(side: "yes" | "no", raw: unknown, priceMode: string | null) {
+  const price = Number(raw);
+  if (!Number.isFinite(price)) return null;
+  return side === "no" && priceMode === "unified_yes" ? 1 - price : price;
+}
+
+function reconstructMarks(rows: JournalRow[]) {
+  const books = new Map<string, {
+    yes: Map<number, number>;
+    no: Map<number, number>;
+    receivedAt: string;
+    exchangeAt: string | null;
+  }>();
+
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.raw_text) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const msg = payload.msg && typeof payload.msg === "object"
+      ? payload.msg as Record<string, unknown>
+      : {};
+    const ticker = String(msg.market_ticker ?? row.market_ticker ?? "");
+    if (!ticker) continue;
+
+    const existing = books.get(ticker) ?? {
+      yes: new Map<number, number>(),
+      no: new Map<number, number>(),
+      receivedAt: row.received_at.toISOString(),
+      exchangeAt: null,
+    };
+
+    if (row.channel === "orderbook_snapshot") {
+      existing.yes.clear();
+      existing.no.clear();
+      for (const side of ["yes", "no"] as const) {
+        const levels = msg[`${side}_dollars_fp`];
+        if (!Array.isArray(levels)) continue;
+        const bookSide = side === "yes" ? existing.yes : existing.no;
+        for (const level of levels) {
+          if (!Array.isArray(level) || level.length < 2) continue;
+          const price = nativePrice(side, level[0], row.price_mode);
+          const qty = Number(level[1]);
+          if (price === null || !Number.isFinite(qty) || qty <= 0) continue;
+          bookSide.set(price, qty);
+        }
+      }
+    } else {
+      const side = msg.side === "yes" || msg.side === "no" ? msg.side : null;
+      if (side) {
+        const price = nativePrice(side, msg.price_dollars, row.price_mode);
+        const delta = Number(msg.delta_fp);
+        if (price !== null && Number.isFinite(delta)) {
+          const bookSide = side === "yes" ? existing.yes : existing.no;
+          const next = (bookSide.get(price) ?? 0) + delta;
+          if (next > 0) bookSide.set(price, next);
+          else bookSide.delete(price);
+        }
+      }
+    }
+
+    existing.receivedAt = row.received_at.toISOString();
+    existing.exchangeAt = row.exchange_ts_ms === null
+      ? existing.exchangeAt
+      : new Date(Number(row.exchange_ts_ms)).toISOString();
+    books.set(ticker, existing);
+  }
+
+  const marks = new Map<string, LiveMark>();
+  for (const [ticker, book] of books) {
+    const yesPrices = [...book.yes.keys()];
+    const noPrices = [...book.no.keys()];
+    marks.set(ticker, {
+      yesBid: yesPrices.length ? Math.max(...yesPrices) : null,
+      noBid: noPrices.length ? Math.max(...noPrices) : null,
+      receivedAt: book.receivedAt,
+      exchangeAt: book.exchangeAt,
+    });
+  }
+  return marks;
+}
+
 export async function GET() {
   if (!pool) {
     return NextResponse.json({ available: false, sessionId: null, generatedAt: new Date().toISOString(), trades: [] });
@@ -88,37 +189,88 @@ export async function GET() {
       [sessionId],
     );
 
+    const tickers = [...new Set(result.rows.map((row) => row.market_ticker))];
+    let liveMarks = new Map<string, LiveMark>();
+
+    if (tickers.length) {
+      const journal = await pool.query<JournalRow>(
+        `WITH latest_snapshot AS (
+           SELECT DISTINCT ON (market_ticker)
+                  market_ticker,id,connection_id
+             FROM market_data_journal
+            WHERE session_id=$1
+              AND market_ticker=ANY($2::text[])
+              AND channel='orderbook_snapshot'
+            ORDER BY market_ticker,received_epoch_ms DESC,id DESC
+         )
+         SELECT j.market_ticker,j.id::text,j.channel,j.received_at,j.exchange_ts_ms::text,j.raw_text,j.price_mode
+           FROM latest_snapshot s
+           JOIN market_data_journal j
+             ON j.session_id=$1
+            AND j.market_ticker=s.market_ticker
+            AND j.connection_id=s.connection_id
+            AND j.id>=s.id
+          WHERE j.channel IN ('orderbook_snapshot','orderbook_delta')
+          ORDER BY j.market_ticker,j.id ASC`,
+        [sessionId, tickers],
+      );
+      liveMarks = reconstructMarks(journal.rows);
+    }
+
     return NextResponse.json({
       available: true,
       sessionId,
       generatedAt: new Date().toISOString(),
-      trades: result.rows.map((row) => ({
-        id: row.id,
-        portfolioId: row.portfolio_id,
-        modeCode: row.mode_code,
-        strategyCode: row.strategy_code,
-        strategyName: row.strategy_display_name,
-        stationCode: row.station_code,
-        eventTicker: row.event_ticker,
-        marketTicker: row.market_ticker,
-        contractLabel: row.contract_label,
-        lowerBoundF: row.lower_bound_f === null ? null : Number(row.lower_bound_f),
-        upperBoundF: row.upper_bound_f === null ? null : Number(row.upper_bound_f),
-        side: row.outcome_side,
-        status: row.status,
-        requestedQty: Number(row.requested_qty),
-        filledQty: Number(row.filled_qty),
-        entryPrice: row.avg_fill_price === null ? null : Number(row.avg_fill_price),
-        grossCost: Number(row.gross_cost),
-        fee: Number(row.estimated_fee),
-        worstPrice: row.worst_price === null ? null : Number(row.worst_price),
-        decisionAt: row.decision_at.toISOString(),
-        arrivalAt: row.simulated_arrival_at.toISOString(),
-        positionStatus: row.position_status,
-        positionQty: row.position_qty === null ? null : Number(row.position_qty),
-        positionCostBasis: row.position_cost_basis === null ? null : Number(row.position_cost_basis),
-        lastMark: row.last_mark === null ? null : Number(row.last_mark),
-      })),
+      trades: result.rows.map((row) => {
+        const entryPrice = row.avg_fill_price === null ? null : Number(row.avg_fill_price);
+        const filledQty = Number(row.filled_qty);
+        const grossCost = Number(row.gross_cost);
+        const entryFee = Number(row.estimated_fee);
+        const mark = liveMarks.get(row.market_ticker) ?? null;
+        const latestPrice = row.outcome_side === "yes" ? mark?.yesBid ?? null : mark?.noBid ?? null;
+        const priceChange = latestPrice === null || entryPrice === null ? null : latestPrice - entryPrice;
+        const priceChangePct = priceChange === null || entryPrice === null || entryPrice <= 0
+          ? null
+          : priceChange / entryPrice;
+        const markPnl = latestPrice === null
+          ? null
+          : latestPrice * filledQty - grossCost - entryFee;
+
+        return {
+          id: row.id,
+          portfolioId: row.portfolio_id,
+          modeCode: row.mode_code,
+          strategyCode: row.strategy_code,
+          strategyName: row.strategy_display_name,
+          stationCode: row.station_code,
+          eventTicker: row.event_ticker,
+          marketTicker: row.market_ticker,
+          contractLabel: row.contract_label,
+          lowerBoundF: row.lower_bound_f === null ? null : Number(row.lower_bound_f),
+          upperBoundF: row.upper_bound_f === null ? null : Number(row.upper_bound_f),
+          side: row.outcome_side,
+          status: row.status,
+          requestedQty: Number(row.requested_qty),
+          filledQty,
+          entryPrice,
+          grossCost,
+          fee: entryFee,
+          worstPrice: row.worst_price === null ? null : Number(row.worst_price),
+          decisionAt: row.decision_at.toISOString(),
+          arrivalAt: row.simulated_arrival_at.toISOString(),
+          positionStatus: row.position_status,
+          positionQty: row.position_qty === null ? null : Number(row.position_qty),
+          positionCostBasis: row.position_cost_basis === null ? null : Number(row.position_cost_basis),
+          lastMark: row.last_mark === null ? null : Number(row.last_mark),
+          latestPrice,
+          latestPriceAt: mark?.receivedAt ?? null,
+          latestExchangeAt: mark?.exchangeAt ?? null,
+          priceChange,
+          priceChangePct,
+          markPnl,
+          markMethod: latestPrice === null ? null : "executable_bid",
+        };
+      }),
     });
   } catch (error) {
     return NextResponse.json(
