@@ -1,0 +1,435 @@
+.section {
+  position: relative;
+  background: #071713;
+  color: #f3f0e7;
+  border-top: 1px solid rgba(243, 240, 231, 0.12);
+  padding: 88px 0 96px;
+}
+
+.shell {
+  width: min(1220px, calc(100% - 48px));
+  margin: 0 auto;
+}
+
+.header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 54px;
+  align-items: end;
+  margin-bottom: 28px;
+}
+
+.kicker {
+  display: block;
+  color: #b9efbd;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 14px;
+}
+
+.header h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(42px, 5vw, 66px);
+  line-height: 0.98;
+  letter-spacing: -0.05em;
+  font-weight: 400;
+}
+
+.header p {
+  max-width: 720px;
+  margin: 20px 0 0;
+  color: rgba(243, 240, 231, 0.62);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.heartbeat {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid rgba(243, 240, 231, 0.16);
+  border-radius: 6px;
+  padding: 13px 15px;
+  min-width: 220px;
+}
+
+.heartbeat div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.heartbeat strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.heartbeat span {
+  color: rgba(243, 240, 231, 0.48);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.liveDot,
+.hotDot,
+.errorDot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.liveDot {
+  background: #b9efbd;
+  box-shadow: 0 0 0 5px rgba(185, 239, 189, 0.1);
+}
+
+.hotDot {
+  background: #dbea7d;
+  box-shadow: 0 0 0 5px rgba(219, 234, 125, 0.12);
+}
+
+.errorDot {
+  background: #e99a55;
+  box-shadow: 0 0 0 5px rgba(233, 154, 85, 0.12);
+}
+
+.errorBanner {
+  border: 1px solid rgba(233, 154, 85, 0.4);
+  background: rgba(233, 154, 85, 0.08);
+  color: #ffd7b3;
+  border-radius: 5px;
+  padding: 12px 14px;
+  font-size: 11px;
+  margin-bottom: 18px;
+}
+
+.stationGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.stationCard,
+.emptyState {
+  border: 1px solid rgba(243, 240, 231, 0.14);
+  background: #102520;
+  border-radius: 7px;
+  padding: 18px;
+}
+
+.stationTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.stationTop div {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+}
+
+.stationTop strong {
+  font-family: Georgia, serif;
+  font-size: 22px;
+  font-weight: 400;
+}
+
+.stationTop span,
+.stationTop small {
+  color: rgba(243, 240, 231, 0.48);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.stationMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 18px 0 14px;
+  border-top: 1px solid rgba(243, 240, 231, 0.1);
+  border-bottom: 1px solid rgba(243, 240, 231, 0.1);
+}
+
+.stationMetrics > div {
+  padding: 13px 12px 13px 0;
+  border-right: 1px solid rgba(243, 240, 231, 0.1);
+}
+
+.stationMetrics > div + div {
+  padding-left: 12px;
+}
+
+.stationMetrics > div:last-child {
+  border-right: 0;
+}
+
+.stationMetrics span,
+.stationTimes span,
+.signalMetric span {
+  display: block;
+  color: rgba(243, 240, 231, 0.42);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.stationMetrics strong {
+  display: block;
+  margin-top: 5px;
+  color: #b9efbd;
+  font-family: Georgia, serif;
+  font-size: 24px;
+  font-weight: 400;
+}
+
+.stationTimes {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+
+.stationTimes span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 9px;
+}
+
+.stationTimes b {
+  color: rgba(243, 240, 231, 0.76);
+  font-weight: 550;
+  margin-left: 4px;
+}
+
+.emptyState {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: rgba(243, 240, 231, 0.48);
+}
+
+.emptyState strong {
+  color: #f3f0e7;
+  font-size: 13px;
+}
+
+.emptyState span {
+  font-size: 11px;
+}
+
+.signalPanel {
+  border: 1px solid rgba(243, 240, 231, 0.14);
+  border-radius: 7px;
+  overflow: hidden;
+  background: #0c201b;
+}
+
+.signalHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 24px;
+  padding: 17px 18px;
+  border-bottom: 1px solid rgba(243, 240, 231, 0.12);
+}
+
+.signalHeader > div:first-child span {
+  color: #b9efbd;
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.signalHeader h3 {
+  margin: 5px 0 0;
+  font-family: Georgia, serif;
+  font-size: 25px;
+  font-weight: 400;
+}
+
+.signalCounts {
+  display: flex;
+  gap: 17px;
+  color: rgba(243, 240, 231, 0.5);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.signalCounts b {
+  color: #f3f0e7;
+  font-size: 13px;
+  margin-right: 3px;
+}
+
+.signalList {
+  display: grid;
+}
+
+.signalRow {
+  display: grid;
+  grid-template-columns: 1.25fr repeat(5, minmax(100px, 0.8fr));
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(243, 240, 231, 0.08);
+}
+
+.signalRow:last-child {
+  border-bottom: 0;
+}
+
+.signalIdentity {
+  min-width: 0;
+}
+
+.signalIdentity > strong {
+  display: block;
+  margin: 7px 0 3px;
+  font-size: 12px;
+}
+
+.signalIdentity > small {
+  display: block;
+  color: rgba(243, 240, 231, 0.36);
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 99px;
+  padding: 4px 7px;
+  font-size: 7px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.open_gap {
+  color: #071713;
+  background: #dbea7d;
+}
+
+.repriced {
+  color: #b9efbd;
+  border: 1px solid rgba(185, 239, 189, 0.28);
+  background: rgba(185, 239, 189, 0.08);
+}
+
+.awaiting_quote {
+  color: #ffd7b3;
+  border: 1px solid rgba(233, 154, 85, 0.28);
+  background: rgba(233, 154, 85, 0.08);
+}
+
+.signalMetric strong {
+  display: block;
+  margin: 5px 0 3px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.signalMetric small {
+  display: block;
+  color: rgba(243, 240, 231, 0.38);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.emptySignals {
+  padding: 24px 18px;
+  color: rgba(243, 240, 231, 0.45);
+  font-size: 11px;
+}
+
+.caveat {
+  margin: 13px 2px 0;
+  color: rgba(243, 240, 231, 0.38);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.floatingLink {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  background: #102520;
+  color: #f3f0e7;
+  border: 1px solid rgba(185, 239, 189, 0.28);
+  border-radius: 99px;
+  padding: 10px 13px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+@media (max-width: 1000px) {
+  .header {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .heartbeat {
+    width: fit-content;
+  }
+
+  .signalRow {
+    grid-template-columns: 1fr repeat(2, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .section {
+    padding: 68px 0 76px;
+  }
+
+  .shell {
+    width: min(100% - 28px, 1220px);
+  }
+
+  .stationGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .signalHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .signalCounts {
+    flex-wrap: wrap;
+  }
+
+  .signalRow {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .signalIdentity {
+    grid-column: 1 / -1;
+  }
+
+  .floatingLink {
+    right: 12px;
+    bottom: 12px;
+  }
+}
