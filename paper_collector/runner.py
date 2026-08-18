@@ -33,7 +33,9 @@ def main() -> int:
         ("awc", "weather_collector.py", True),
         ("omo", "omo_collector.py", True),
         ("rules", "rule_collector.py", True),
-        # Auditor failure makes readiness red but should not halt evidence capture.
+        # Trading/audit failures must not destroy the evidence stream. Both are
+        # supervised and restarted so recording continues while readiness turns red.
+        ("trader", "paper_engine.py", False),
         ("auditor", "audit_daemon.py", False),
     ]
     children: dict[str, tuple[subprocess.Popen[str], bool]] = {}
@@ -79,8 +81,6 @@ def main() -> int:
                     exit_code = code if code != 0 else 1
                     terminate()
                     break
-                # Restart non-critical auditor after a short delay. Its output is
-                # diagnostic; collection must continue even if an audit process crashes.
                 time.sleep(1)
                 script = next(script for child_name, script, _ in child_specs if child_name == name)
                 children[name] = (subprocess.Popen([sys.executable, script], env=env, text=True), False)
