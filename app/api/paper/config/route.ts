@@ -4,6 +4,8 @@ import { pool, transaction } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
+const PAPER_EXECUTABLE_STRATEGIES = new Set(["DBN"]);
+
 type ModePatch = {
   modeCode: string;
   enabled?: boolean;
@@ -114,6 +116,7 @@ async function payload() {
       paperTradeEnabled: row.paper_trade_enabled,
       shadowEnabled: row.shadow_enabled,
       realMoneyEligible: row.real_money_eligible,
+      paperExecutable: PAPER_EXECUTABLE_STRATEGIES.has(row.strategy_code),
       config: row.config,
       updatedAt: row.updated_at.toISOString(),
     })),
@@ -156,6 +159,15 @@ export async function PUT(request: NextRequest) {
       { status: 400 },
     );
   }
+  const unsupportedTrade = (body.strategies ?? []).find(
+    (patch) => patch.paperTradeEnabled === true && !PAPER_EXECUTABLE_STRATEGIES.has(patch.strategyCode),
+  );
+  if (unsupportedTrade) {
+    return NextResponse.json(
+      { error: `${unsupportedTrade.strategyCode} does not have a validated paper execution engine yet; keep it shadow-only` },
+      { status: 400 },
+    );
+  }
 
   await transaction(async (client) => {
     if (body.global) {
@@ -194,6 +206,9 @@ export async function PUT(request: NextRequest) {
 
     for (const patch of body.strategies ?? []) {
       if (!patch.strategyCode) continue;
+      const paperTradeEnabled = PAPER_EXECUTABLE_STRATEGIES.has(patch.strategyCode)
+        ? patch.paperTradeEnabled ?? null
+        : false;
       await client.query(
         `UPDATE paper_strategy_configs
             SET enabled=COALESCE($2, enabled),
@@ -205,7 +220,7 @@ export async function PUT(request: NextRequest) {
         [
           patch.strategyCode,
           patch.enabled ?? null,
-          patch.paperTradeEnabled ?? null,
+          paperTradeEnabled,
           patch.shadowEnabled ?? null,
           patch.config ? JSON.stringify(patch.config) : null,
         ],
