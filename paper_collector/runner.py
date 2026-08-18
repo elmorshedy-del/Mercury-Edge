@@ -138,6 +138,7 @@ def main() -> int:
         ("rules", "rule_collector.py", True),
         ("paper_trader", "unified_engine.py", False),
         ("auditor", "audit_daemon.py", False),
+        ("status", "status_reporter.py", False),
     ]
     children: dict[str, tuple[subprocess.Popen[str], bool]] = {}
     for name, script, critical in child_specs:
