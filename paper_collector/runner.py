@@ -26,18 +26,12 @@ def main() -> int:
     env = os.environ.copy()
     normalize_private_key_env(env)
     env.setdefault("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
-
-    # Collect broadly while keeping the expensive high-frequency IEM path focused.
-    # Environment variables still override every default for deployment experiments.
     env.setdefault("SERIES_TICKERS", ",".join(MARKET_SERIES))
     env.setdefault("WEATHER_STATIONS", ",".join(WEATHER_STATIONS))
     env.setdefault(
         "OMO_STATION_NETWORKS",
         ",".join(f"{station}:{network}" for station, network in OMO_DEFAULT_NETWORKS.items()),
     )
-    # IEM is a research/first-seen path, not our intended final low-latency feed.
-    # Ten priority stations at 15s avoids unnecessary request pressure while still
-    # resolving public-feed arrival to a useful sub-minute interval.
     env.setdefault("IEM_OMO_POLL_SECONDS", "15")
 
     child_specs = [
@@ -45,9 +39,10 @@ def main() -> int:
         ("awc", "weather_collector.py", True),
         ("omo", "omo_collector.py", True),
         ("rules", "rule_collector.py", True),
-        # Trading/audit failures must not destroy the evidence stream. Both are
-        # supervised and restarted so recording continues while readiness turns red.
-        ("trader", "paper_engine.py", False),
+        # DBN stays isolated from the experimental multi-strategy engine so a
+        # research-strategy bug cannot halt the simplest hard-state paper path.
+        ("dbn_trader", "paper_engine.py", False),
+        ("strategy_trader", "strategy_engine.py", False),
         ("auditor", "audit_daemon.py", False),
     ]
     children: dict[str, tuple[subprocess.Popen[str], bool]] = {}
