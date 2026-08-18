@@ -39,10 +39,10 @@ def main() -> int:
         ("awc", "weather_collector.py", True),
         ("omo", "omo_collector.py", True),
         ("rules", "rule_collector.py", True),
-        # DBN stays isolated from the experimental multi-strategy engine so a
-        # research-strategy bug cannot halt the simplest hard-state paper path.
-        ("dbn_trader", "paper_engine.py", False),
-        ("strategy_trader", "strategy_engine.py", False),
+        # One deterministic engine owns portfolio decisions for every strategy.
+        # It is non-critical so evidence capture survives a strategy bug; the
+        # supervisor restarts it and the DB uniqueness guards prevent duplicates.
+        ("paper_trader", "unified_engine.py", False),
         ("auditor", "audit_daemon.py", False),
     ]
     children: dict[str, tuple[subprocess.Popen[str], bool]] = {}
@@ -57,6 +57,7 @@ def main() -> int:
         "omo_priority_count": len(OMO_DEFAULT_NETWORKS),
         "weather_stations": list(WEATHER_STATIONS),
         "omo_priority_stations": list(OMO_DEFAULT_NETWORKS),
+        "paper_strategies": ["DBN", "DSN", "SBK", "HSR", "WTY", "RMO", "PRV", "LVP", "HMF"],
         "children": [{"name": name, "critical": critical} for name, _, critical in child_specs],
     }))
 
