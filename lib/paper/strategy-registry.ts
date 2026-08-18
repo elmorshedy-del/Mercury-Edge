@@ -33,32 +33,32 @@ export const STRATEGIES: Record<StrategyCode, StrategySpec> = {
     hardStateRequired: true,
     allowRealMoneyWhenProven: true,
     description: "Buy NO on one bucket whose upper bound is below an irreversible settlement-compatible running maximum.",
-    requiredEvidence: ["proven_settlement_compatibility", "exact_contract_bounds", "fresh_l2_book"],
+    requiredEvidence: ["proven_settlement_compatibility", "exact_contract_bounds", "fresh_sequenced_l2_book", "verified_fees"],
   },
   DSN: {
     code: "DSN",
     name: "Dead-Set NO",
     family: "hard_state",
     hardStateRequired: true,
-    allowRealMoneyWhenProven: true,
+    allowRealMoneyWhenProven: false,
     description: "Buy NO across a set of eliminated buckets when routing or depth makes a multi-leg dead-set preferable.",
-    requiredEvidence: ["proven_settlement_compatibility", "complete_dead_set", "fresh_l2_books"],
+    requiredEvidence: ["proven_settlement_compatibility", "complete_dead_set", "fresh_sequenced_l2_books", "multi_leg_fill_risk_validated"],
   },
   SBK: {
     code: "SBK",
     name: "Survivor Basket",
     family: "hard_state",
     hardStateRequired: true,
-    allowRealMoneyWhenProven: true,
+    allowRealMoneyWhenProven: false,
     description: "Buy YES on every still-feasible mutually exclusive bucket when the exhaustive basket costs less than its certain payout after fees.",
-    requiredEvidence: ["proven_settlement_compatibility", "exhaustive_survivor_set", "simultaneous_l2_depth", "verified_fees"],
+    requiredEvidence: ["proven_settlement_compatibility", "exhaustive_survivor_set", "simultaneous_l2_depth", "verified_fees", "incomplete_basket_risk_validated"],
   },
   HSR: {
     code: "HSR",
     name: "Hard-State Router",
     family: "hard_state",
     hardStateRequired: true,
-    allowRealMoneyWhenProven: true,
+    allowRealMoneyWhenProven: false,
     description: "Compare payoff-equivalent DBN/DSN/SBK constructions and choose the cheapest sufficiently deep executable route.",
     requiredEvidence: ["proven_settlement_compatibility", "complete_event_books", "verified_fees", "atomicity_or_fill_risk_model"],
   },
@@ -109,8 +109,12 @@ export const STRATEGIES: Record<StrategyCode, StrategySpec> = {
   },
 };
 
-export const REAL_MONEY_PHASE_1: StrategyCode[] = ["DBN", "DSN", "SBK", "HSR"];
-export const SHADOW_ONLY_UNTIL_VALIDATED: StrategyCode[] = ["WTY", "RMO", "PRV", "LVP", "HMF"];
+// Phase 1 intentionally contains only the simplest single-leg hard-state trade.
+// Every other strategy remains paper/shadow until its additional execution risk
+// (multi-leg atomicity, forecast risk, precision transform, or sequencing) has
+// been independently validated.
+export const REAL_MONEY_PHASE_1: StrategyCode[] = ["DBN"];
+export const SHADOW_ONLY_UNTIL_VALIDATED: StrategyCode[] = ["DSN", "SBK", "HSR", "WTY", "RMO", "PRV", "LVP", "HMF"];
 
 export function strategy(code: StrategyCode) {
   return STRATEGIES[code];
