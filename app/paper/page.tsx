@@ -1,5 +1,5 @@
-import { LiveMonitor } from "@/components/LiveMonitor";
 import { PaperTradingControl } from "@/components/PaperTradingControl";
+import { PaperTradingTerminal } from "@/components/PaperTradingTerminal";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
@@ -7,34 +7,19 @@ export const dynamic = "force-dynamic";
 export default function PaperTraderPage() {
   return (
     <div className={styles.page}>
-      <header className={styles.topbar}>
-        <a className={styles.brand} href="/">
-          <span className={styles.mark} />
-          <span className={styles.brandText}>
-            <small>Mercury Edge</small>
-            <strong>Paper Trader</strong>
-          </span>
-        </a>
-        <a className={styles.back} href="/">← Research dashboard</a>
-      </header>
+      <PaperTradingTerminal />
 
-      <section className={styles.hero}>
-        <div>
-          <div className={styles.eyebrow}><span className={styles.dot} />Live paper execution</div>
-          <h1>The bot.<br /><em>One signal stream.</em><br />Six $1,000 portfolios.</h1>
+      <section className={styles.settings} id="paper-settings">
+        <div className={styles.settingsHeader}>
+          <div>
+            <span>Configuration</span>
+            <h2>Paper engine settings</h2>
+          </div>
           <p>
-            This is the operating dashboard for Mercury Edge paper trading. Every portfolio sees the same audited weather and Kalshi L2 timeline; strategies and capital rules can be compared without splitting bankroll between modes.
+            Existing controls are preserved below the terminal. This section changes presentation only; execution logic and trading rules remain in their original components and services.
           </p>
         </div>
-        <div className={styles.modePill}>Real money disabled</div>
-      </section>
-
-      <div className={styles.rule} />
-      <PaperTradingControl />
-
-      <section className={styles.live}>
-        <div className={styles.liveTitle}>Live ingestion monitor</div>
-        <LiveMonitor />
+        <PaperTradingControl />
       </section>
     </div>
   );
