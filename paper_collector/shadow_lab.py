@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Counterfactual paper research that never touches benchmark bankrolls.
 
-Every qualifying signal can be replayed across a latency ladder, a budget ladder,
-and (for routers) every route.  These trials are intentionally independent
-alternative universes: they answer sensitivity questions quickly without
-changing the six $1,000 benchmark sleeves or consuming their cash.
+Every qualifying signal is replayed across latency, budget, entry-price, and
+route ladders. Trials are independent alternative universes: they answer
+sensitivity questions quickly without changing the six $1,000 benchmark sleeves
+or consuming their cash.
 """
 
 import json
@@ -24,12 +24,14 @@ def d(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
-def _ladders(global_cfg: dict[str, Any]) -> tuple[list[int], list[Decimal]]:
+def _ladders(global_cfg: dict[str, Any]) -> tuple[list[int], list[Decimal], list[Decimal]]:
     raw_latencies = global_cfg.get("experiment_latency_ladder_ms") or global_cfg.get("latency_ladder_ms") or [0, 50, 100, 250, 500, 1000]
     raw_budgets = global_cfg.get("experiment_budget_ladder") or [10, 25, 50, 100, 200]
+    raw_caps = global_cfg.get("experiment_price_cap_ladder") or [0.50, 0.65, 0.75, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99]
     latencies = sorted({max(0, int(x)) for x in raw_latencies})
     budgets = sorted({d(x) for x in raw_budgets if d(x) > 0})
-    return latencies, budgets
+    caps = sorted({d(x) for x in raw_caps if ZERO < d(x) <= Decimal("1")})
+    return latencies, budgets, caps
 
 
 def _equal_quantity_fills(
@@ -116,9 +118,10 @@ def _expected_payout(
     quantities = [sum((q for _, q in fills), ZERO) for _, _, fills, _, _, _ in executions]
     if not quantities:
         return None
-    if variant == "dsn" or variant.startswith("dbn"):
+    route = variant.split("|", 1)[0]
+    if route == "dsn" or route.startswith("dbn"):
         return sum(quantities, ZERO)
-    if variant == "sbk" or bundle.equal_leg_quantity:
+    if route == "sbk" or bundle.equal_leg_quantity:
         if max(quantities) - min(quantities) <= QTY_STEP / 100:
             return quantities[0]
     if len(executions) == 1:
@@ -184,27 +187,108 @@ def record_bundle_trials(
     if not bool(global_cfg.get("paper_experiment_lab_enabled", True)):
         return 0
 
-    latencies, budgets = _ladders(global_cfg)
+    latencies, budgets, price_caps = _ladders(global_cfg)
     inter_leg = max(0, int(strategy_cfg.get("config", {}).get("multi_leg_inter_order_ms", 5)))
     routes = bundle.route_options if bundle.route_options else {bundle.strategy_code.lower(): bundle.legs}
     written = 0
 
-    for variant, legs in routes.items():
+    for route_name, legs in routes.items():
         if not legs:
             continue
+        route_max = min(leg.max_price for leg in legs)
+        effective_caps = sorted({min(route_max, cap) for cap in price_caps})
+        if route_max not in effective_caps:
+            effective_caps.append(route_max)
+            effective_caps.sort()
+
         for latency in latencies:
-            book_levels: list[tuple[se.Leg, se.FullBook, list[tuple[Decimal, Decimal]]]] = []
+            books: list[tuple[se.Leg, se.FullBook, int]] = []
             for index, leg in enumerate(legs):
                 arrival_ms = leg.trigger_epoch_ms + latency + index * inter_leg
                 book = se.reconstruct_full_book(conn, session_id, leg.market_ticker, arrival_ms)
-                levels = se.asks(book, leg.side, leg.max_price) if book else []
-                if not book or not levels:
-                    book_levels = []
+                if not book:
+                    books = []
                     break
-                book_levels.append((leg, book, levels))
+                books.append((leg, book, arrival_ms))
 
-            for budget in budgets:
-                if not book_levels:
+            for price_cap in effective_caps:
+                variant = f"{route_name}|cap={format(price_cap, 'f')}"
+                book_levels: list[tuple[se.Leg, se.FullBook, list[tuple[Decimal, Decimal]]]] = []
+                if books:
+                    for leg, book, _ in books:
+                        levels = se.asks(book, leg.side, min(leg.max_price, price_cap))
+                        if not levels:
+                            book_levels = []
+                            break
+                        book_levels.append((leg, book, levels))
+
+                for budget in budgets:
+                    if not book_levels:
+                        _insert_trial(
+                            conn,
+                            session_id=session_id,
+                            signal_id=signal_id,
+                            strategy_code=bundle.strategy_code,
+                            variant=variant,
+                            latency_ms=latency,
+                            budget=budget,
+                            status="blocked",
+                            details={
+                                "reason": "NO_VALID_L2_AT_COUNTERFACTUAL_ARRIVAL",
+                                "price_cap": format(price_cap, "f"),
+                            },
+                        )
+                        written += 1
+                        continue
+
+                    equal = bundle.equal_leg_quantity or route_name == "sbk"
+                    executions = (
+                        _equal_quantity_fills(book_levels, budget, fee_multiplier)
+                        if equal
+                        else _split_budget_fills(book_levels, budget, fee_multiplier)
+                    )
+                    if len(executions) != len(book_levels):
+                        _insert_trial(
+                            conn,
+                            session_id=session_id,
+                            signal_id=signal_id,
+                            strategy_code=bundle.strategy_code,
+                            variant=variant,
+                            latency_ms=latency,
+                            budget=budget,
+                            status="unfilled",
+                            details={
+                                "reason": "COUNTERFACTUAL_FOK_NOT_SATISFIED",
+                                "legs": len(book_levels),
+                                "price_cap": format(price_cap, "f"),
+                            },
+                        )
+                        written += 1
+                        continue
+
+                    gross = ZERO
+                    fee = ZERO
+                    leg_details: list[dict[str, Any]] = []
+                    for index, (leg, book, fills, cost, leg_fee, _) in enumerate(executions):
+                        qty = sum((q for _, q in fills), ZERO)
+                        leg_gross = sum((p * q for p, q in fills), ZERO)
+                        gross += leg_gross
+                        fee += leg_fee
+                        arrival_ms = books[index][2]
+                        leg_details.append({
+                            "market_ticker": leg.market_ticker,
+                            "side": leg.side,
+                            "qty": format(qty, "f"),
+                            "gross_cost": format(leg_gross, "f"),
+                            "fee": format(leg_fee, "f"),
+                            "avg_fill_price": format(leg_gross / qty, "f") if qty > 0 else None,
+                            "fills": [[format(p, "f"), format(q, "f")] for p, q in fills],
+                            "book_seq": book.last_seq,
+                            "connection_id": book.connection_id,
+                            "arrival_ms": arrival_ms,
+                        })
+
+                    expected = _expected_payout(bundle, variant, executions)
                     _insert_trial(
                         conn,
                         session_id=session_id,
@@ -213,74 +297,19 @@ def record_bundle_trials(
                         variant=variant,
                         latency_ms=latency,
                         budget=budget,
-                        status="blocked",
-                        details={"reason": "NO_VALID_L2_AT_COUNTERFACTUAL_ARRIVAL"},
+                        status="filled",
+                        gross_cost=gross,
+                        fee=fee,
+                        expected_payout=expected,
+                        details={
+                            "signal_class": bundle.signal_class,
+                            "auditor_status": bundle.auditor_status,
+                            "event_ticker": bundle.event_ticker,
+                            "weather_id": bundle.weather_id,
+                            "inter_leg_ms": inter_leg,
+                            "price_cap": format(price_cap, "f"),
+                            "legs": leg_details,
+                        },
                     )
                     written += 1
-                    continue
-
-                equal = bundle.equal_leg_quantity or variant == "sbk"
-                executions = (
-                    _equal_quantity_fills(book_levels, budget, fee_multiplier)
-                    if equal
-                    else _split_budget_fills(book_levels, budget, fee_multiplier)
-                )
-                if len(executions) != len(book_levels):
-                    _insert_trial(
-                        conn,
-                        session_id=session_id,
-                        signal_id=signal_id,
-                        strategy_code=bundle.strategy_code,
-                        variant=variant,
-                        latency_ms=latency,
-                        budget=budget,
-                        status="unfilled",
-                        details={"reason": "COUNTERFACTUAL_FOK_NOT_SATISFIED", "legs": len(book_levels)},
-                    )
-                    written += 1
-                    continue
-
-                gross = ZERO
-                fee = ZERO
-                leg_details: list[dict[str, Any]] = []
-                for leg, book, fills, cost, leg_fee, _ in executions:
-                    qty = sum((q for _, q in fills), ZERO)
-                    leg_gross = sum((p * q for p, q in fills), ZERO)
-                    gross += leg_gross
-                    fee += leg_fee
-                    leg_details.append({
-                        "market_ticker": leg.market_ticker,
-                        "side": leg.side,
-                        "qty": format(qty, "f"),
-                        "gross_cost": format(leg_gross, "f"),
-                        "fee": format(leg_fee, "f"),
-                        "avg_fill_price": format(leg_gross / qty, "f") if qty > 0 else None,
-                        "fills": [[format(p, "f"), format(q, "f")] for p, q in fills],
-                        "book_seq": book.last_seq,
-                        "connection_id": book.connection_id,
-                    })
-
-                expected = _expected_payout(bundle, variant, executions)
-                _insert_trial(
-                    conn,
-                    session_id=session_id,
-                    signal_id=signal_id,
-                    strategy_code=bundle.strategy_code,
-                    variant=variant,
-                    latency_ms=latency,
-                    budget=budget,
-                    status="filled",
-                    gross_cost=gross,
-                    fee=fee,
-                    expected_payout=expected,
-                    details={
-                        "signal_class": bundle.signal_class,
-                        "auditor_status": bundle.auditor_status,
-                        "event_ticker": bundle.event_ticker,
-                        "weather_id": bundle.weather_id,
-                        "inter_leg_ms": inter_leg,
-                        "legs": leg_details,
-                    },
-                )
-                written += 1
     return written
