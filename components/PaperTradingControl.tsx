@@ -53,6 +53,13 @@ type ModeDraft = {
   executionLatencyMs: number;
 };
 
+type StrategyDraft = {
+  enabled: boolean;
+  paperTradeEnabled: boolean;
+  shadowEnabled: boolean;
+  maxPortfolioPct: number;
+};
+
 function num(value: unknown, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -71,7 +78,7 @@ export function PaperTradingControl() {
   const [bankroll, setBankroll] = useState(1000);
   const [token, setToken] = useState("");
   const [modeDrafts, setModeDrafts] = useState<Record<string, ModeDraft>>({});
-  const [strategyDrafts, setStrategyDrafts] = useState<Record<string, Pick<Strategy, "enabled" | "paperTradeEnabled" | "shadowEnabled">>>({});
+  const [strategyDrafts, setStrategyDrafts] = useState<Record<string, StrategyDraft>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -94,6 +101,7 @@ export function PaperTradingControl() {
       enabled: strategy.enabled,
       paperTradeEnabled: strategy.paperTradeEnabled,
       shadowEnabled: strategy.shadowEnabled,
+      maxPortfolioPct: num(strategy.config.max_portfolio_pct, strategy.realMoneyEligible ? 0.5 : 0.1),
     }])));
   }, []);
 
@@ -157,6 +165,7 @@ export function PaperTradingControl() {
               enabled: draft?.enabled ?? strategy.enabled,
               paperTradeEnabled: draft?.paperTradeEnabled ?? strategy.paperTradeEnabled,
               shadowEnabled: draft?.shadowEnabled ?? strategy.shadowEnabled,
+              config: draft ? { max_portfolio_pct: draft.maxPortfolioPct } : {},
             };
           }),
         }),
@@ -254,13 +263,19 @@ export function PaperTradingControl() {
           <h3>Strategy controls</h3>
           <div className={styles.strategyGrid}>
             {data?.strategies.map((strategy) => {
-              const draft = strategyDrafts[strategy.strategyCode] ?? strategy;
+              const draft = strategyDrafts[strategy.strategyCode] ?? {
+                enabled: strategy.enabled,
+                paperTradeEnabled: strategy.paperTradeEnabled,
+                shadowEnabled: strategy.shadowEnabled,
+                maxPortfolioPct: num(strategy.config.max_portfolio_pct, strategy.realMoneyEligible ? 0.5 : 0.1),
+              };
               return (
                 <div className={styles.strategy} key={strategy.strategyCode}>
                   <div><strong>{strategy.strategyCode} · {strategy.displayName}</strong><small>{strategy.family}{strategy.realMoneyEligible ? " · Phase-1 eligible" : " · research"}</small></div>
                   <div className={styles.checks}>
                     <label><input type="checkbox" checked={draft.paperTradeEnabled} onChange={(e) => setStrategyDrafts((old) => ({ ...old, [strategy.strategyCode]: { ...draft, paperTradeEnabled: e.target.checked } }))} /> trade</label>
                     <label><input type="checkbox" checked={draft.shadowEnabled} onChange={(e) => setStrategyDrafts((old) => ({ ...old, [strategy.strategyCode]: { ...draft, shadowEnabled: e.target.checked } }))} /> shadow</label>
+                    <label>cap % <input type="number" min="0" max="1" step="0.01" value={draft.maxPortfolioPct} onChange={(e) => setStrategyDrafts((old) => ({ ...old, [strategy.strategyCode]: { ...draft, maxPortfolioPct: Number(e.target.value) } }))} /></label>
                   </div>
                 </div>
               );
