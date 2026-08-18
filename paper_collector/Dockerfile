@@ -8,5 +8,6 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY collector.py ./collector.py
+RUN python -m py_compile collector.py
 
 CMD ["python", "collector.py"]
