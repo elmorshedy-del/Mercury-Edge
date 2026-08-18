@@ -1,6 +1,5 @@
 import {
   PRICE_SCALE,
-  QTY_SCALE,
   complementPriceFp,
   microsToDollars,
   notionalMicros,
