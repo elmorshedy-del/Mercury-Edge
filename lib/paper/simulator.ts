@@ -1,7 +1,7 @@
-import { predictionTakerFee, type FeeType } from "./fees";
+import { predictionTakerFeesForFills, type FeeFillBreakdown, type FeeType } from "./fees";
 import { consumeAsTaker, type BookSide, type KalshiOrderBook, type SimulatedFill } from "./orderbook";
 
-export const DEFAULT_LATENCY_LADDER_MS = [0, 50, 100, 250, 500, 1_000, 2_000, 5_000] as const;
+export const DEFAULT_LATENCY_LADDER_MS = [0, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000] as const;
 
 export type PaperOrderIntent = {
   signalId: string;
@@ -14,7 +14,7 @@ export type PaperOrderIntent = {
   timeInForce: "ioc" | "fok";
   feeType: FeeType;
   feeMultiplier: number;
-  linearCent: boolean;
+  directMember?: boolean;
 };
 
 export type PaperExecution = {
@@ -26,10 +26,12 @@ export type PaperExecution = {
   decisionEpochMs: number;
   arrivalEpochMs: number;
   bookReceivedEpochMs: number;
+  stateKnownThroughEpochMs: number;
   bookSeq: number;
   status: "filled" | "partial" | "unfilled" | "blocked";
   fill: SimulatedFill;
   fee: number | null;
+  feeBreakdown: FeeFillBreakdown[];
   totalCost: number | null;
   blockReason: string | null;
 };
@@ -38,91 +40,77 @@ export function executeTakerAtBook(input: {
   intent: PaperOrderIntent;
   latencyMs: number;
   book: KalshiOrderBook;
-  bookReceivedEpochMs: number;
+  stateKnownThroughEpochMs: number;
 }): PaperExecution {
-  const { intent, latencyMs, book, bookReceivedEpochMs } = input;
+  const { intent, latencyMs, book, stateKnownThroughEpochMs } = input;
   const arrivalEpochMs = intent.decisionEpochMs + latencyMs;
   const snap = book.snapshot();
 
-  if (bookReceivedEpochMs < arrivalEpochMs) {
-    return blocked(intent, latencyMs, bookReceivedEpochMs, snap.seq, "BOOK_PRECEDES_SIMULATED_ARRIVAL");
+  // A replay may use a book state older than the arrival if no intervening book
+  // event occurred. What is forbidden is using a state from the future or one
+  // not known to remain valid through the arrival instant.
+  if (snap.receivedEpochMs > arrivalEpochMs) {
+    return blocked(intent, latencyMs, snap.receivedEpochMs, stateKnownThroughEpochMs, snap.seq, "FUTURE_BOOK_LEAKAGE");
+  }
+  if (stateKnownThroughEpochMs < arrivalEpochMs) {
+    return blocked(intent, latencyMs, snap.receivedEpochMs, stateKnownThroughEpochMs, snap.seq, "BOOK_STATE_NOT_KNOWN_THROUGH_ARRIVAL");
   }
 
   const fill = consumeAsTaker(book, intent.outcome, intent.qty, intent.maxPrice);
-  if (intent.timeInForce === "fok" && fill.filledQty + 1e-9 < intent.qty) {
-    return {
-      signalId: intent.signalId,
-      strategyCode: intent.strategyCode,
-      marketTicker: intent.marketTicker,
-      outcome: intent.outcome,
-      latencyMs,
-      decisionEpochMs: intent.decisionEpochMs,
-      arrivalEpochMs,
-      bookReceivedEpochMs,
-      bookSeq: snap.seq,
-      status: "unfilled",
-      fill: { ...fill, filledQty: 0, avgPrice: null, grossCost: 0, worstPrice: null, levels: [] },
-      fee: 0,
-      totalCost: 0,
-      blockReason: null,
-    };
+  if (intent.timeInForce === "fok" && fill.filledQtyFp < fill.requestedQtyFp) {
+    const zero = zeroedFill(fill);
+    return result(intent, latencyMs, snap.receivedEpochMs, stateKnownThroughEpochMs, snap.seq, "unfilled", zero, 0, [], 0, null);
   }
 
-  if (fill.filledQty <= 1e-9 || fill.avgPrice === null) {
-    return {
-      signalId: intent.signalId,
-      strategyCode: intent.strategyCode,
-      marketTicker: intent.marketTicker,
-      outcome: intent.outcome,
-      latencyMs,
-      decisionEpochMs: intent.decisionEpochMs,
-      arrivalEpochMs,
-      bookReceivedEpochMs,
-      bookSeq: snap.seq,
-      status: "unfilled",
-      fill,
-      fee: 0,
-      totalCost: 0,
-      blockReason: null,
-    };
+  if (fill.filledQtyFp <= 0 || fill.avgPrice === null) {
+    return result(intent, latencyMs, snap.receivedEpochMs, stateKnownThroughEpochMs, snap.seq, "unfilled", fill, 0, [], 0, null);
   }
 
-  const feeQuote = predictionTakerFee({
+  const feeQuote = predictionTakerFeesForFills({
     feeType: intent.feeType,
     feeMultiplier: intent.feeMultiplier,
-    contracts: fill.filledQty,
-    price: fill.avgPrice,
-    linearCent: intent.linearCent,
+    directMember: intent.directMember,
+    fills: fill.levels.map((level) => ({ priceFp: level.priceFp, qtyFp: level.qtyFp })),
   });
-  if (!feeQuote.supported || feeQuote.cashFeeUpperBound === null) {
-    return blocked(intent, latencyMs, bookReceivedEpochMs, snap.seq, `FEE_MODEL_BLOCKED:${feeQuote.reason ?? "UNKNOWN"}`, fill);
+  if (!feeQuote.supported || feeQuote.netFee === null) {
+    return blocked(
+      intent,
+      latencyMs,
+      snap.receivedEpochMs,
+      stateKnownThroughEpochMs,
+      snap.seq,
+      `FEE_MODEL_BLOCKED:${feeQuote.reason ?? "UNKNOWN"}`,
+      fill,
+    );
   }
 
-  return {
-    signalId: intent.signalId,
-    strategyCode: intent.strategyCode,
-    marketTicker: intent.marketTicker,
-    outcome: intent.outcome,
+  return result(
+    intent,
     latencyMs,
-    decisionEpochMs: intent.decisionEpochMs,
-    arrivalEpochMs,
-    bookReceivedEpochMs,
-    bookSeq: snap.seq,
-    status: fill.filledQty + 1e-9 >= intent.qty ? "filled" : "partial",
+    snap.receivedEpochMs,
+    stateKnownThroughEpochMs,
+    snap.seq,
+    fill.filledQtyFp >= fill.requestedQtyFp ? "filled" : "partial",
     fill,
-    fee: feeQuote.cashFeeUpperBound,
-    totalCost: fill.grossCost + feeQuote.cashFeeUpperBound,
-    blockReason: null,
-  };
+    feeQuote.netFee,
+    feeQuote.fills,
+    fill.grossCost + feeQuote.netFee,
+    null,
+  );
 }
 
-function blocked(
+function result(
   intent: PaperOrderIntent,
   latencyMs: number,
   bookReceivedEpochMs: number,
+  stateKnownThroughEpochMs: number,
   bookSeq: number,
-  reason: string,
-  fill: SimulatedFill = { requestedQty: intent.qty, filledQty: 0, avgPrice: null, grossCost: 0, worstPrice: null, levels: [] },
+  status: PaperExecution["status"],
+  fill: SimulatedFill,
+  fee: number | null,
+  feeBreakdown: FeeFillBreakdown[],
+  totalCost: number | null,
+  blockReason: string | null,
 ): PaperExecution {
   return {
     signalId: intent.signalId,
@@ -133,13 +121,70 @@ function blocked(
     decisionEpochMs: intent.decisionEpochMs,
     arrivalEpochMs: intent.decisionEpochMs + latencyMs,
     bookReceivedEpochMs,
+    stateKnownThroughEpochMs,
     bookSeq,
-    status: "blocked",
+    status,
     fill,
-    fee: null,
-    totalCost: null,
-    blockReason: reason,
+    fee,
+    feeBreakdown,
+    totalCost,
+    blockReason,
   };
+}
+
+function emptyFill(requestedQty: number): SimulatedFill {
+  return {
+    requestedQty,
+    requestedQtyFp: Math.round(requestedQty * 100),
+    filledQty: 0,
+    filledQtyFp: 0,
+    avgPrice: null,
+    avgPriceFpApprox: null,
+    grossCost: 0,
+    grossCostMicros: 0,
+    worstPrice: null,
+    worstPriceFp: null,
+    levels: [],
+  };
+}
+
+function zeroedFill(fill: SimulatedFill): SimulatedFill {
+  return {
+    ...fill,
+    filledQty: 0,
+    filledQtyFp: 0,
+    avgPrice: null,
+    avgPriceFpApprox: null,
+    grossCost: 0,
+    grossCostMicros: 0,
+    worstPrice: null,
+    worstPriceFp: null,
+    levels: [],
+  };
+}
+
+function blocked(
+  intent: PaperOrderIntent,
+  latencyMs: number,
+  bookReceivedEpochMs: number,
+  stateKnownThroughEpochMs: number,
+  bookSeq: number,
+  reason: string,
+  fill: SimulatedFill = emptyFill(intent.qty),
+): PaperExecution {
+  return result(
+    intent,
+    latencyMs,
+    bookReceivedEpochMs,
+    stateKnownThroughEpochMs,
+    bookSeq,
+    "blocked",
+    fill,
+    null,
+    [],
+    null,
+    reason,
+  );
 }
 
 export type PendingPaperOrder = {
@@ -149,26 +194,56 @@ export type PendingPaperOrder = {
 };
 
 /**
- * Deterministic replay helper. Feed reconstructed books in received-time order.
- * A pending order executes on the first book state received at or after its
- * simulated arrival time. This prevents using a later minute close as though it
- * existed at the signal instant.
+ * Deterministic event-time replay.
+ *
+ * The engine owns the last reconstructed book for each ticker. Before applying a
+ * new book event at T, orders arriving strictly before T execute against the
+ * previous state, which by definition remained unchanged through their arrival.
+ * Orders arriving exactly at T execute after the update (conservative tie-break).
  */
-export class LatencyReplayQueue {
+export class LatencyReplayEngine {
   private pending: PendingPaperOrder[] = [];
+  private books = new Map<string, KalshiOrderBook>();
+  private nowMs = Number.NEGATIVE_INFINITY;
 
   add(intent: PaperOrderIntent, latencies: readonly number[] = DEFAULT_LATENCY_LADDER_MS) {
     for (const latencyMs of latencies) this.pending.push({ intent, latencyMs, executed: false });
   }
 
-  onBook(book: KalshiOrderBook, receivedEpochMs: number) {
+  onBookUpdate(book: KalshiOrderBook, receivedEpochMs: number) {
+    if (receivedEpochMs < this.nowMs) throw new Error(`REPLAY_TIME_REVERSAL ${receivedEpochMs} < ${this.nowMs}`);
+    const executions = this.executeDue(receivedEpochMs, false);
+    this.books.set(book.marketTicker, book);
+    this.nowMs = receivedEpochMs;
+    executions.push(...this.executeDue(receivedEpochMs, true));
+    return executions;
+  }
+
+  flushThrough(epochMs: number) {
+    if (epochMs < this.nowMs) throw new Error(`REPLAY_TIME_REVERSAL ${epochMs} < ${this.nowMs}`);
+    const executions = this.executeDue(epochMs, true);
+    this.nowMs = epochMs;
+    return executions;
+  }
+
+  private executeDue(knownThroughMs: number, includeEqual: boolean) {
     const executions: PaperExecution[] = [];
     for (const item of this.pending) {
       if (item.executed) continue;
-      if (item.intent.marketTicker !== book.marketTicker) continue;
-      if (receivedEpochMs < item.intent.decisionEpochMs + item.latencyMs) continue;
+      const arrival = item.intent.decisionEpochMs + item.latencyMs;
+      if (includeEqual ? arrival > knownThroughMs : arrival >= knownThroughMs) continue;
+      const book = this.books.get(item.intent.marketTicker);
       item.executed = true;
-      executions.push(executeTakerAtBook({ intent: item.intent, latencyMs: item.latencyMs, book, bookReceivedEpochMs: receivedEpochMs }));
+      if (!book) {
+        executions.push(blocked(item.intent, item.latencyMs, 0, knownThroughMs, 0, "NO_BOOK_AT_ARRIVAL"));
+        continue;
+      }
+      executions.push(executeTakerAtBook({
+        intent: item.intent,
+        latencyMs: item.latencyMs,
+        book,
+        stateKnownThroughEpochMs: knownThroughMs,
+      }));
     }
     return executions;
   }
@@ -177,3 +252,6 @@ export class LatencyReplayQueue {
     return this.pending.filter((x) => !x.executed);
   }
 }
+
+// Backward name retained for imports; semantics are the corrected event-time replay.
+export const LatencyReplayQueue = LatencyReplayEngine;
