@@ -41,7 +41,6 @@ type LiveSignal = {
   label: string;
   triggeredAt: string;
   triggerTemperatureF: number;
-  entryYesAskCents: number | null;
   noAskProxyCents: number | null;
   latestYesAskCents: number | null;
   reactionLagSeconds: number | null;
@@ -51,6 +50,37 @@ type LiveSignal = {
 type LivePayload = {
   generatedAt: string;
   signals: LiveSignal[];
+};
+
+type ExecutionTrade = {
+  id: string;
+  portfolioId: string | null;
+  modeCode: string | null;
+  strategyCode: string;
+  stationCode: string;
+  eventTicker: string | null;
+  marketTicker: string;
+  side: "yes" | "no";
+  status: "filled" | "partial";
+  requestedQty: number;
+  filledQty: number;
+  entryPrice: number | null;
+  grossCost: number;
+  fee: number;
+  worstPrice: number | null;
+  decisionAt: string;
+  arrivalAt: string;
+  positionStatus: "open" | "closed" | "settled" | null;
+  positionQty: number | null;
+  positionCostBasis: number | null;
+  lastMark: number | null;
+};
+
+type ExecutionPayload = {
+  available: boolean;
+  sessionId: string | null;
+  generatedAt: string;
+  trades: ExecutionTrade[];
 };
 
 function money(value: number) {
@@ -64,6 +94,10 @@ function money(value: number) {
 
 function cents(value: number | null) {
   return value === null ? "—" : `${Math.round(value)}¢`;
+}
+
+function priceCents(value: number | null) {
+  return value === null ? "—" : `${(value * 100).toFixed(value * 100 < 10 ? 1 : 0)}¢`;
 }
 
 function clock(value: string, timezone = "America/New_York") {
@@ -93,22 +127,28 @@ function lag(value: number | null) {
 export function PaperTradingTerminal() {
   const [config, setConfig] = useState<ConfigPayload | null>(null);
   const [live, setLive] = useState<LivePayload | null>(null);
+  const [executions, setExecutions] = useState<ExecutionPayload | null>(null);
   const [selectedMode, setSelectedMode] = useState("balanced");
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     try {
-      const [configResponse, liveResponse] = await Promise.all([
+      const [configResponse, liveResponse, executionResponse] = await Promise.all([
         fetch("/api/paper/config", { cache: "no-store" }),
         fetch("/api/live", { cache: "no-store" }),
+        fetch("/api/paper/executions", { cache: "no-store" }),
       ]);
       if (!configResponse.ok) throw new Error(`Paper config returned ${configResponse.status}`);
       if (!liveResponse.ok) throw new Error(`Live feed returned ${liveResponse.status}`);
+      if (!executionResponse.ok) throw new Error(`Paper executions returned ${executionResponse.status}`);
+
       const nextConfig = await configResponse.json() as ConfigPayload;
       const nextLive = await liveResponse.json() as LivePayload;
+      const nextExecutions = await executionResponse.json() as ExecutionPayload;
       setConfig(nextConfig);
       setLive(nextLive);
+      setExecutions(nextExecutions);
       setNow(Date.now());
       setError(null);
       if (nextConfig.portfolios.length && !nextConfig.portfolios.some((portfolio) => portfolio.modeCode === selectedMode)) {
@@ -146,6 +186,10 @@ export function PaperTradingTerminal() {
   const signals = useMemo(
     () => [...(live?.signals ?? [])].sort((a, b) => new Date(b.triggeredAt).getTime() - new Date(a.triggeredAt).getTime()).slice(0, 10),
     [live],
+  );
+  const takenTrades = useMemo(
+    () => (executions?.trades ?? []).filter((trade) => !selected?.modeCode || trade.modeCode === selected.modeCode).slice(0, 50),
+    [executions, selected?.modeCode],
   );
 
   const openSignals = live?.signals.filter((signal) => signal.status === "open_gap").length ?? 0;
@@ -195,10 +239,10 @@ export function PaperTradingTerminal() {
           </div>
 
           <div className={styles.sideSection}>
-            <div className={styles.sideLabel}>Signal state</div>
-            <div className={styles.sideStat}><span>Open gaps</span><b>{openSignals}</b></div>
-            <div className={styles.sideStat}><span>Repriced</span><b>{repricedSignals}</b></div>
-            <div className={styles.sideStat}><span>Total today</span><b>{live?.signals.length ?? 0}</b></div>
+            <div className={styles.sideLabel}>Execution state</div>
+            <div className={styles.sideStat}><span>Trades taken</span><b>{takenTrades.length}</b></div>
+            <div className={styles.sideStat}><span>Open raw signals</span><b>{openSignals}</b></div>
+            <div className={styles.sideStat}><span>Repriced signals</span><b>{repricedSignals}</b></div>
           </div>
 
           <div className={styles.safetyCard}>
@@ -224,7 +268,7 @@ export function PaperTradingTerminal() {
           <section className={styles.metrics}>
             <article><span>Cash</span><strong>{money(cash)}</strong><small>available balance</small></article>
             <article><span>Capital deployed</span><strong>{money(deployed)}</strong><small>{utilization.toFixed(1)}% of bankroll</small></article>
-            <article><span>Reserved</span><strong>{money(reserved)}</strong><small>held by paper engine</small></article>
+            <article><span>Trades taken</span><strong>{takenTrades.length}</strong><small>filled / partial only</small></article>
             <article><span>Session</span><strong>{selected?.status ?? config?.latestSession?.status ?? "waiting"}</strong><small>{config?.latestSession ? age(config.latestSession.startedAt, now) : "not started"}</small></article>
           </section>
 
@@ -276,12 +320,47 @@ export function PaperTradingTerminal() {
 
           <section className={styles.tableCard}>
             <div className={styles.cardHeader}>
-              <div><span>Live market intelligence</span><h2>Signal tape</h2></div>
-              <small>Signal ≠ fill · existing /api/live feed</small>
+              <div><span>Actual paper execution</span><h2>Trades taken</h2></div>
+              <small>paper_orders · filled / partial only</small>
             </div>
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <thead><tr><th>Time</th><th>Station</th><th>Contract</th><th>Signal</th><th>NO entry proxy</th><th>Latest YES ask</th><th>Reaction</th><th>Status</th></tr></thead>
+                <thead><tr><th>Time</th><th>Station</th><th>Market</th><th>Strategy</th><th>Side</th><th>In</th><th>Out / mark</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
+                <tbody>
+                  {takenTrades.map((trade) => {
+                    const closed = trade.positionStatus === "closed" || trade.positionStatus === "settled";
+                    return (
+                      <tr key={trade.id}>
+                        <td>{clock(trade.decisionAt)}</td>
+                        <td><b>{trade.stationCode}</b><small>{trade.eventTicker ?? "—"}</small></td>
+                        <td><b>{trade.marketTicker}</b><small>{trade.modeCode ?? "unassigned"}</small></td>
+                        <td>{trade.strategyCode}</td>
+                        <td><span className={styles.signalSide}>{trade.side.toUpperCase()}</span></td>
+                        <td><b>{priceCents(trade.entryPrice)}</b><small>avg fill</small></td>
+                        <td><b>{closed ? priceCents(trade.lastMark) : "—"}</b><small>{closed ? trade.positionStatus : trade.lastMark === null ? "open" : `mark ${priceCents(trade.lastMark)}`}</small></td>
+                        <td><b>{trade.filledQty.toFixed(2)}</b><small>req {trade.requestedQty.toFixed(2)}</small></td>
+                        <td>{money(trade.grossCost)}</td>
+                        <td>{money(trade.fee)}</td>
+                        <td><span className={styles.statusBadge}>TAKEN · {trade.status}</span></td>
+                      </tr>
+                    );
+                  })}
+                  {!takenTrades.length && (
+                    <tr><td colSpan={11} className={styles.emptyRow}>No filled or partial paper orders for this portfolio in the current session.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className={styles.tableCard}>
+            <div className={styles.cardHeader}>
+              <div><span>Raw detections · not executions</span><h2>Signal tape</h2></div>
+              <small>Signals below are never labeled as trades</small>
+            </div>
+            <div className={styles.tableWrap}>
+              <table className={styles.table}>
+                <thead><tr><th>Time</th><th>Station</th><th>Contract</th><th>Signal</th><th>NO proxy</th><th>Latest YES ask</th><th>Reaction</th><th>Status</th></tr></thead>
                 <tbody>
                   {signals.map((signal) => (
                     <tr key={`${signal.station}-${signal.contractTicker}-${signal.triggeredAt}`}>
@@ -296,22 +375,10 @@ export function PaperTradingTerminal() {
                     </tr>
                   ))}
                   {!signals.length && (
-                    <tr><td colSpan={8} className={styles.emptyRow}>No live signals in the current read-only feed yet.</td></tr>
+                    <tr><td colSpan={8} className={styles.emptyRow}>No raw live signals in the current feed.</td></tr>
                   )}
                 </tbody>
               </table>
-            </div>
-          </section>
-
-          <section className={styles.tableCard}>
-            <div className={styles.cardHeader}>
-              <div><span>Execution</span><h2>Trade ledger</h2></div>
-              <small>Never inferred from signal data</small>
-            </div>
-            <div className={styles.ledgerHead}><span>Time</span><span>Market</span><span>Side</span><span>In</span><span>Out</span><span>Qty</span><span>P&amp;L</span></div>
-            <div className={styles.ledgerEmpty}>
-              <b>No trade-history read endpoint is currently exposed to the UI.</b>
-              <span>This terminal intentionally leaves fills blank instead of presenting signals or quote proxies as executed trades.</span>
             </div>
           </section>
         </main>
