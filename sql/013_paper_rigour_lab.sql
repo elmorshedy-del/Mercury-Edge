@@ -58,14 +58,14 @@ CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
 CREATE INDEX IF NOT EXISTS paper_equity_snapshots_time_idx
   ON paper_equity_snapshots(captured_at DESC, portfolio_id);
 
--- Every aggressiveness mode is an independent alternative universe.  They all
+-- Every aggressiveness mode is an independent alternative universe. They all
 -- begin at exactly $1,000; no cash or exposure is shared between portfolio IDs.
 UPDATE paper_portfolio_mode_configs
 SET starting_bankroll=1000.00,
     updated_at=now()
 WHERE enabled;
 
--- Drawdown thresholds differ deliberately by sleeve.  These are benchmark risk
+-- Drawdown thresholds differ deliberately by sleeve. These are benchmark risk
 -- policies, not claims of optimality; the shadow lab lets us compare alternatives.
 UPDATE paper_portfolio_mode_configs
 SET config = config || CASE mode_code
@@ -90,6 +90,8 @@ SET config = config || '{
   "paper_experiment_lab_enabled":true,
   "experiment_latency_ladder_ms":[0,10,25,50,100,250,500,1000,2000,5000],
   "experiment_budget_ladder":[10,25,50,100,200],
+  "experiment_price_cap_ladder":[0.50,0.65,0.75,0.80,0.85,0.90,0.93,0.95,0.97,0.99],
+  "experiment_exit_horizons_ms":[1000,5000,15000,30000,60000,120000,300000,600000,1800000],
   "drawdown_risk_enabled":true,
   "risk_state_max_age_seconds":30,
   "mark_incomplete_blocks_new_entries":true,
