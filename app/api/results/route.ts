@@ -4,7 +4,7 @@ import { pool } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (!pool) return NextResponse.json({ mode: "verified_demo", latestRun: null, stations: [], coverage: [] });
+  if (!pool) return NextResponse.json({ mode: "verified_demo", latestRun: null, stations: [], signals: [], coverage: [] });
   const latest = await pool.query<{
     id: string; model_version: string; started_at: Date; finished_at: Date | null;
     as_of_start: Date; as_of_end: Date; status: string; summary: Record<string, unknown>;
@@ -26,6 +26,21 @@ export async function GET() {
             sum(gross_profit_per_contract)::text AS gross,
             sum(net_profit_per_contract)::text AS net
        FROM backtest_signals WHERE run_id=$1 GROUP BY station_code ORDER BY station_code`,
+    [run.id],
+  ) : { rows: [] };
+  const signalRows = run ? await pool.query<{
+    id: string; station_code: string; trade_date: string; label: string;
+    triggered_at: Date; entry_price: string | null; reaction_lag_seconds: number | null;
+    executable_proxy: boolean; outcome: string | null; net_profit_per_contract: string | null;
+  }>(
+    `SELECT bs.id, bs.station_code, e.trade_date::text, mc.label,
+            bs.triggered_at, bs.entry_price, bs.reaction_lag_seconds,
+            bs.executable_proxy, bs.outcome, bs.net_profit_per_contract
+       FROM backtest_signals bs
+       JOIN market_events e ON e.event_ticker=bs.event_ticker
+       JOIN market_contracts mc ON mc.ticker=bs.contract_ticker
+      WHERE bs.run_id=$1
+      ORDER BY bs.triggered_at DESC, bs.id DESC`,
     [run.id],
   ) : { rows: [] };
   const coverage = await pool.query<{
@@ -84,6 +99,18 @@ export async function GET() {
       averageLagSeconds: row.avg_lag === null ? null : Number(row.avg_lag),
       grossProfit: row.gross === null ? null : Number(row.gross),
       netProfit: row.net === null ? null : Number(row.net),
+    })),
+    signals: signalRows.rows.map((row) => ({
+      id: Number(row.id),
+      station: row.station_code,
+      date: row.trade_date.slice(0, 10),
+      contract: row.label,
+      triggeredAt: row.triggered_at.toISOString(),
+      entryCents: row.entry_price === null ? null : Number(row.entry_price) * 100,
+      reactionLagSeconds: row.reaction_lag_seconds,
+      executable: row.executable_proxy,
+      outcome: row.outcome,
+      netProfit: row.net_profit_per_contract === null ? null : Number(row.net_profit_per_contract),
     })),
     coverage: coverage.rows.map((row) => ({
       station: row.station_code,
