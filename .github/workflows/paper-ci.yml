@@ -41,21 +41,104 @@ jobs:
   probe-backtest-results:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch deployed Mercury backtest aggregates
+      - name: Analyze deployed Mercury backtest results
         run: |
           python - <<'PY'
-          import json, urllib.request
-          url='https://mercury-edge-web-production.up.railway.app/api/results'
-          with urllib.request.urlopen(url, timeout=30) as r:
-              data=json.load(r)
-          print('LATEST_RUN', json.dumps(data.get('latestRun'), sort_keys=True))
-          print('STATIONS')
-          for row in sorted(data.get('stations', []), key=lambda x: (-(x.get('netProfit') or 0), -(x.get('averageLagSeconds') or 0))):
-              print(json.dumps(row, sort_keys=True))
-          print('SIGNALS')
-          for row in sorted(data.get('signals', []), key=lambda x: (x.get('reactionLagSeconds') or -1), reverse=True):
-              print(json.dumps(row, sort_keys=True))
+          import json, math, statistics, urllib.request
+          from collections import Counter, defaultdict
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          URL='https://mercury-edge-web-production.up.railway.app/api/results'
+          TZ={
+            'KNYC':'America/New_York','KPHL':'America/New_York','KMDW':'America/Chicago',
+            'KDEN':'America/Denver','KMIA':'America/New_York','KLAX':'America/Los_Angeles',
+            'KAUS':'America/Chicago','KATL':'America/New_York','KBOS':'America/New_York',
+            'KDFW':'America/Chicago','KDCA':'America/New_York','KHOU':'America/Chicago',
+            'KLAS':'America/Los_Angeles','KMSP':'America/Chicago','KMSY':'America/Chicago',
+            'KOKC':'America/Chicago','KPHX':'America/Phoenix','KSAT':'America/Chicago',
+            'KSEA':'America/Los_Angeles','KSFO':'America/Los_Angeles'
+          }
+          with urllib.request.urlopen(URL, timeout=30) as r: data=json.load(r)
+          signals=data.get('signals',[])
+          station_api={x['station']:x for x in data.get('stations',[])}
+          by=defaultdict(list)
+          for s in signals: by[s['station']].append(s)
+
+          def pct(xs,p):
+            if not xs:return None
+            ys=sorted(xs); k=(len(ys)-1)*p; f=math.floor(k); c=math.ceil(k)
+            return ys[f] if f==c else ys[f]+(ys[c]-ys[f])*(k-f)
+          def rnd(x): return None if x is None else round(x,2)
+
+          print('RUN',json.dumps(data.get('latestRun'),sort_keys=True))
+          print('STATION_RESEARCH_RANKING')
+          rows=[]
+          for st,ss in by.items():
+            lags=[float(x['reactionLagSeconds']) for x in ss if x.get('reactionLagSeconds') is not None]
+            entries=[float(x['entryCents']) for x in ss if x.get('entryCents') is not None]
+            nets=[float(x['netProfit']) for x in ss if x.get('netProfit') is not None]
+            positive=[max(0,n) for n in nets]
+            local_hours=[]
+            local_30=[]
+            for x in ss:
+              try:
+                dt=datetime.fromisoformat(x['triggeredAt'].replace('Z','+00:00')).astimezone(ZoneInfo(TZ[st]))
+                local_hours.append(dt.hour)
+                local_30.append(f'{dt.hour:02d}:{(dt.minute//30)*30:02d}')
+              except Exception: pass
+            dates=Counter(x['date'] for x in ss)
+            top_n=max(positive) if positive else 0
+            pos_sum=sum(positive)
+            row={
+              'station':st,
+              'signals':len(ss),
+              'executable':sum(bool(x.get('executable')) for x in ss),
+              'resolved':sum(x.get('outcome') is not None for x in ss),
+              'wins':sum(x.get('outcome')=='win' for x in ss),
+              'lag_n':len(lags),'lag_median_s':rnd(statistics.median(lags)) if lags else None,
+              'lag_mean_s':rnd(statistics.mean(lags)) if lags else None,'lag_p90_s':rnd(pct(lags,.9)),
+              'lag_max_s':rnd(max(lags)) if lags else None,
+              'lags_ge_30s':sum(v>=30 for v in lags),'lags_ge_60s':sum(v>=60 for v in lags),
+              'lags_ge_120s':sum(v>=120 for v in lags),
+              'entry_median_c':rnd(statistics.median(entries)) if entries else None,
+              'entry_min_c':rnd(min(entries)) if entries else None,'entry_max_c':rnd(max(entries)) if entries else None,
+              'net_total':rnd(sum(nets)) if nets else None,
+              'positive_profit_top1_share':rnd(top_n/pos_sum) if pos_sum>0 else None,
+              'distinct_dates':len(dates),'multi_signal_dates':sum(v>1 for v in dates.values()),
+              'modal_local_hour':Counter(local_hours).most_common(1)[0] if local_hours else None,
+              'modal_local_30m':Counter(local_30).most_common(1)[0] if local_30 else None,
+              'api_avg_lag_s':station_api.get(st,{}).get('averageLagSeconds'),
+              'api_win_rate':station_api.get(st,{}).get('winRate'),
+            }
+            rows.append(row)
+          # discovery score rewards repeatability + long tails + executability, not reported P&L alone
+          for r in rows:
+            r['discovery_score']=round((r['executable']+1)*math.log2(r['signals']+2)*(1+(r['lag_median_s'] or 0)/60)*(1+(r['lag_p90_s'] or 0)/180),3)
+          for r in sorted(rows,key=lambda x:x['discovery_score'],reverse=True): print(json.dumps(r,sort_keys=True))
+
+          print('TOP_30_LONGEST_SIGNALS')
+          long=sorted([x for x in signals if x.get('reactionLagSeconds') is not None],key=lambda x:x['reactionLagSeconds'],reverse=True)[:30]
+          for x in long:
+            dt=datetime.fromisoformat(x['triggeredAt'].replace('Z','+00:00')).astimezone(ZoneInfo(TZ.get(x['station'],'UTC')))
+            y=dict(x); y['local_trigger']=dt.isoformat(); print(json.dumps(y,sort_keys=True))
+
+          print('PHOENIX_ALL_SIGNALS')
+          for x in sorted(by.get('KPHX',[]),key=lambda x:(x.get('date',''),x.get('triggeredAt',''))):
+            y=dict(x)
+            try:y['local_trigger']=datetime.fromisoformat(x['triggeredAt'].replace('Z','+00:00')).astimezone(ZoneInfo('America/Phoenix')).isoformat()
+            except Exception:pass
+            print(json.dumps(y,sort_keys=True))
+
+          print('CROSS_STATION_DATE_CLUSTERS')
+          d=defaultdict(list)
+          for x in signals:d[x['date']].append(x)
+          for day,ss in sorted(d.items()):
+            stations=sorted(set(x['station'] for x in ss))
+            if len(stations)>=3:
+              l=[x.get('reactionLagSeconds') for x in ss if x.get('reactionLagSeconds') is not None]
+              print(json.dumps({'date':day,'stations':stations,'signals':len(ss),'median_lag_s':rnd(statistics.median(l)) if l else None,'max_lag_s':rnd(max(l)) if l else None},sort_keys=True))
+
           print('COVERAGE')
-          for row in data.get('coverage', []):
-              print(json.dumps(row, sort_keys=True))
+          for x in data.get('coverage',[]): print(json.dumps(x,sort_keys=True))
           PY
