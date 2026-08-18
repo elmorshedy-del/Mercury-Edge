@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -22,9 +23,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 WS_URL = os.getenv("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/ws/v2")
 REST_BASE = os.getenv("KALSHI_REST_BASE", "https://external-api.kalshi.com/trade-api/v2")
 SERIES = [x.strip() for x in os.getenv("SERIES_TICKERS", "KXHIGHNY,KXHIGHPHIL,KXHIGHLAX").split(",") if x.strip()]
-DISCOVERY_SECONDS = max(5.0, float(os.getenv("MARKET_DISCOVERY_SECONDS", "15")))
-REST_CROSSCHECK_SECONDS = max(5.0, float(os.getenv("REST_CROSSCHECK_SECONDS", "30")))
-MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1.1")
+# Open daily-temperature market universes change slowly. Five-minute discovery
+# keeps subscriptions current without burning REST quota while the WS stays hot.
+DISCOVERY_SECONDS = max(30.0, float(os.getenv("MARKET_DISCOVERY_SECONDS", "300")))
+DISCOVERY_REQUEST_GAP_SECONDS = max(0.05, float(os.getenv("MARKET_DISCOVERY_REQUEST_GAP_SECONDS", "0.30")))
+# REST full-book calls are audit cross-checks, never the trading data path.
+REST_CROSSCHECK_SECONDS = max(30.0, float(os.getenv("REST_CROSSCHECK_SECONDS", "300")))
+MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1.2")
 SESSION_ID = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
 DB_QUEUE_MAX = int(os.getenv("DB_QUEUE_MAX", "100000"))
 DB_BATCH_MAX = int(os.getenv("DB_BATCH_MAX", "250"))
@@ -89,28 +94,83 @@ def auth_headers() -> dict[str, str]:
     }
 
 
-def http_json(url: str) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.1"})
-    with urllib.request.urlopen(req, timeout=10) as response:
-        return json.loads(response.read())
+def http_json(url: str, *, attempts: int = 6) -> dict[str, Any]:
+    """GET JSON with bounded retry for rate limits and transient server errors.
+
+    This runs in a worker thread, so Retry-After sleeps never block the WS receive
+    loop. Authentication/signing is not used for these public REST reads.
+    """
+    delay = 1.0
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.2"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 429 and not 500 <= exc.code < 600:
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                server_delay = float(retry_after) if retry_after else 0.0
+            except (TypeError, ValueError):
+                server_delay = 0.0
+            sleep_for = max(server_delay, delay)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            sleep_for = delay
+        if attempt + 1 >= attempts:
+            break
+        time.sleep(min(60.0, sleep_for))
+        delay = min(30.0, delay * 2)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("HTTP request failed without an exception")
 
 
 async def discover_markets() -> set[str]:
-    async def one(series: str) -> set[str]:
-        params = urllib.parse.urlencode({"series_ticker": series, "status": "open", "limit": 1000})
-        payload = await asyncio.to_thread(http_json, f"{REST_BASE}/markets?{params}")
-        return {str(m["ticker"]) for m in payload.get("markets", []) if m.get("ticker")}
-
-    groups = await asyncio.gather(*(one(series) for series in SERIES))
-    tickers: set[str] = set()
-    for group in groups:
-        tickers.update(group)
-    return tickers
+    """Discover all open markets without an 18-request burst or restart storm."""
+    backoff = 2.0
+    while not stop_event.is_set():
+        tickers: set[str] = set()
+        try:
+            for index, series in enumerate(SERIES):
+                if index:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=DISCOVERY_REQUEST_GAP_SECONDS)
+                        return set()
+                    except asyncio.TimeoutError:
+                        pass
+                params = urllib.parse.urlencode({"series_ticker": series, "status": "open", "limit": 1000})
+                payload = await asyncio.to_thread(http_json, f"{REST_BASE}/markets?{params}")
+                tickers.update(str(m["ticker"]) for m in payload.get("markets", []) if m.get("ticker"))
+            return tickers
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Discovery is necessary for a clean subscription universe, but a
+            # transient REST throttle must never crash/restart the whole service.
+            print(json.dumps({
+                "event": "market_discovery_retry",
+                "error": repr(exc),
+                "backoff_seconds": backoff,
+            }))
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                return set()
+            except asyncio.TimeoutError:
+                pass
+            backoff = min(60.0, backoff * 2)
+    return set()
 
 
 async def discover_after_delay() -> set[str]:
-    await asyncio.sleep(DISCOVERY_SECONDS)
-    return await discover_markets()
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=DISCOVERY_SECONDS)
+        return set()
+    except asyncio.TimeoutError:
+        return await discover_markets()
 
 
 @dataclass
@@ -156,10 +216,11 @@ async def insert_session(conn: psycopg.AsyncConnection[Any]) -> None:
         "rest_base": REST_BASE,
         "use_yes_price": USE_YES_PRICE,
         "price_mode": PRICE_MODE,
-        "collector": "python-websockets-direct",
+        "collector": "python-websockets-direct-v1.2",
         "key_fingerprint": KEY_FINGERPRINT,
         "channels": ["orderbook_delta", "trade"],
         "market_discovery_seconds": DISCOVERY_SECONDS,
+        "market_discovery_request_gap_seconds": DISCOVERY_REQUEST_GAP_SECONDS,
         "rest_crosscheck_seconds": REST_CROSSCHECK_SECONDS,
     }
     await conn.execute(
@@ -239,8 +300,6 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
             except Exception:
                 writer_failed = True
                 await conn.rollback()
-                # Evidence persistence is a hard dependency. Never keep collecting
-                # data that cannot be durably journaled.
                 stop_event.set()
                 raise
             finally:
@@ -263,8 +322,6 @@ async def journal_ws(
     raw_text: str,
     state: ConnectionJournalState,
 ) -> dict[str, Any]:
-    # Timestamp immediately after the WebSocket library yields the complete
-    # message, before JSON parsing, normalization, strategy logic, or DB work.
     wall_ns = time.time_ns()
     mono_ns = time.monotonic_ns()
     raw_bytes = raw_text.encode("utf-8")
@@ -294,8 +351,6 @@ async def journal_ws(
         price_mode=PRICE_MODE,
         source_message_type=message_type,
     )
-    # Backpressure is deliberate: if persistence falls behind, stop advancing
-    # the evidence stream rather than dropping raw messages.
     await queue.put(row)
     state.prev_chain_hash = chain_hash
     return data
@@ -305,7 +360,7 @@ async def journal_rest_orderbook(queue: asyncio.Queue[JournalRow | AuditRow], ti
     url = f"{REST_BASE}/markets/{urllib.parse.quote(ticker, safe='')}/orderbook?depth=0"
     before_ns = time.time_ns()
     before_mono = time.monotonic_ns()
-    payload = await asyncio.to_thread(http_json, url)
+    payload = await asyncio.to_thread(http_json, url, attempts=3)
     after_ns = time.time_ns()
     after_mono = time.monotonic_ns()
     raw_text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -339,19 +394,22 @@ async def rest_crosscheck_loop(
         start = time.monotonic()
         markets = sorted(active_ref["markets"])
         if markets:
-            sem = asyncio.Semaphore(5)
-
-            async def one(ticker: str) -> None:
-                async with sem:
-                    try:
-                        await journal_rest_orderbook(queue, ticker)
-                    except Exception as exc:
-                        await queue.put(AuditRow(
-                            "warning", "kalshi_rest", "REST_ORDERBOOK_CROSSCHECK_FAILED", ticker,
-                            {"error": repr(exc)},
-                        ))
-
-            await asyncio.gather(*(one(t) for t in markets))
+            # Cross-check sequentially: this path is an audit sanity check, not a
+            # latency source, so REST quota is more valuable than speed here.
+            for ticker in markets:
+                if stop_event.is_set():
+                    break
+                try:
+                    await journal_rest_orderbook(queue, ticker)
+                except Exception as exc:
+                    await queue.put(AuditRow(
+                        "warning", "kalshi_rest", "REST_ORDERBOOK_CROSSCHECK_FAILED", ticker,
+                        {"error": repr(exc)},
+                    ))
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    pass
         sleep_for = max(0.1, REST_CROSSCHECK_SECONDS - (time.monotonic() - start))
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=sleep_for)
@@ -399,9 +457,6 @@ async def run_ws(
                     {"connection_id": connection_id, "market_count": len(markets), "price_mode": PRICE_MODE},
                 ))
 
-                # Separate subscriptions keep channel SIDs unambiguous. The
-                # orderbook explicitly opts into unified YES-leg pricing so a
-                # future Kalshi default flip cannot silently change semantics.
                 await ws.send(json.dumps({
                     "id": 1,
                     "cmd": "subscribe",
@@ -433,7 +488,6 @@ async def run_ws(
 
                     if recv_task in done:
                         raw = recv_task.result()
-                        # Schedule the next socket read before doing JSON/queue work.
                         recv_task = asyncio.create_task(ws.recv(), name=f"ws-recv-{connection_id}")
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8")
@@ -470,9 +524,6 @@ async def run_ws(
                                         "missing_to": seq - 1,
                                     },
                                 ))
-                                # Missing deltas are unrecoverable evidence. End
-                                # this continuity generation and reconnect for a
-                                # fresh full snapshot before any further use.
                                 raise SequenceGap(f"sid={sid} expected={prev + 1} got={seq}")
                             last_seq[sid] = seq
 
@@ -488,8 +539,10 @@ async def run_ws(
 
                     if discovery_task in done:
                         discovered = discovery_task.result()
+                        if stop_event.is_set():
+                            break
                         active_ref["markets"] = set(discovered)
-                        if discovered != markets:
+                        if discovered and discovered != markets:
                             await queue.put(AuditRow(
                                 "info", "kalshi_ws", "MARKET_UNIVERSE_CHANGED", None,
                                 {
@@ -498,8 +551,6 @@ async def run_ws(
                                     "removed": sorted(markets - discovered),
                                 },
                             ))
-                            # A reconnect gives both orderbook and trade channels a
-                            # clean, common universe and fresh snapshot boundary.
                             raise MarketUniverseChanged("open market set changed")
                         discovery_task = asyncio.create_task(
                             discover_after_delay(),
@@ -509,13 +560,13 @@ async def run_ws(
         except asyncio.CancelledError:
             raise
         except MarketUniverseChanged:
-            reconnect_backoff = 0.1
+            reconnect_backoff = 0.5
         except (SequenceGap, MissingSnapshot) as exc:
             await queue.put(AuditRow(
                 "fatal", "kalshi_ws", "WS_CONTINUITY_INVALIDATED", None,
                 {"connection_id": connection_id, "error": repr(exc)},
             ))
-            reconnect_backoff = 0.25
+            reconnect_backoff = 0.5
         except Exception as exc:
             await queue.put(AuditRow(
                 "error", "kalshi_ws", "WS_CONNECTION_RESET", None,
@@ -535,7 +586,7 @@ async def run_ws(
                 await asyncio.wait_for(stop_event.wait(), timeout=reconnect_backoff)
             except asyncio.TimeoutError:
                 pass
-            reconnect_backoff = min(15.0, max(0.25, reconnect_backoff * 2))
+            reconnect_backoff = min(30.0, max(0.5, reconnect_backoff * 2))
 
 
 async def main() -> None:
