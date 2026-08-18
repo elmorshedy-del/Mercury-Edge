@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { KalshiOrderBook, consumeAsTaker } from "../lib/paper/orderbook";
+import { KalshiOrderBook, SubscriptionSequenceGuard, consumeAsTaker } from "../lib/paper/orderbook";
 
 function book() {
   const b = new KalshiOrderBook("WX");
@@ -15,8 +15,14 @@ function book() {
 
 test("derives asks from the exact complementary bid with identical size", () => {
   const b = book();
-  assert.deepEqual(b.noAsks()[0], { price: 0.33, qty: 3 });
-  assert.deepEqual(b.yesAsks()[0], { price: 0.69, qty: 4 });
+  const noAsk = b.noAsks()[0];
+  const yesAsk = b.yesAsks()[0];
+  assert.equal(noAsk.price, 0.33);
+  assert.equal(noAsk.qty, 3);
+  assert.equal(noAsk.priceFp, 3300);
+  assert.equal(noAsk.qtyFp, 300);
+  assert.equal(yesAsk.price, 0.69);
+  assert.equal(yesAsk.qty, 4);
 });
 
 test("walks real depth rather than assuming the best quote fills all quantity", () => {
@@ -24,19 +30,26 @@ test("walks real depth rather than assuming the best quote fills all quantity", 
   const fill = consumeAsTaker(b, "no", 8, 0.35);
   assert.equal(fill.filledQty, 8);
   assert.equal(fill.levels.length, 2);
-  assert.deepEqual(fill.levels[0], { price: 0.33, qty: 3 });
-  assert.deepEqual(fill.levels[1], { price: 0.35, qty: 5 });
+  assert.equal(fill.levels[0].price, 0.33);
+  assert.equal(fill.levels[0].qty, 3);
+  assert.equal(fill.levels[1].price, 0.35);
+  assert.equal(fill.levels[1].qty, 5);
   assert.equal(fill.avgPrice, 0.3425);
   assert.equal(fill.grossCost, 2.74);
 });
 
-test("rejects a sequence gap instead of silently mutating a corrupt book", () => {
-  const b = book();
-  assert.throws(() => b.applyDelta({ seq: 12, receivedEpochMs: 1_001, side: "yes", price: 0.67, delta: -1 }), /ORDERBOOK_SEQUENCE_GAP/);
+test("validates sequence continuity at the subscription stream, not per market", () => {
+  const guard = new SubscriptionSequenceGuard();
+  guard.observe(7, 10);
+  guard.observe(7, 11); // could belong to another market on the same sid
+  assert.throws(() => guard.observe(7, 13), /ORDERBOOK_SEQUENCE_GAP/);
+  guard.reset(7);
+  guard.observe(7, 40); // fresh subscription generation can begin at any seq
 });
 
-test("quantizes complement prices to fixed-point wire precision", () => {
+test("complements four-decimal subcent prices exactly", () => {
   const b = new KalshiOrderBook("SUBPENNY");
-  b.applySnapshot({ seq: 1, receivedEpochMs: 1, yes: [["0.333333", "1"]], no: [] });
-  assert.equal(b.noAsks()[0].price, 0.666667);
+  b.applySnapshot({ seq: 1, receivedEpochMs: 1, yes: [["0.3333", "1.00"]], no: [] });
+  assert.equal(b.noAsks()[0].price, 0.6667);
+  assert.equal(b.noAsks()[0].priceFp, 6667);
 });
