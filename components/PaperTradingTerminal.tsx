@@ -1,5 +1,6 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import styles from "./PaperTradingTerminal.module.css";
 
@@ -262,7 +263,7 @@ export function PaperTradingTerminal() {
                 <div><span>Capital</span><h2>Utilization</h2></div>
                 <small>{utilization.toFixed(1)}%</small>
               </div>
-              <div className={styles.utilRing} style={{ "--utilization": `${utilization * 3.6}deg` } as React.CSSProperties}>
+              <div className={styles.utilRing} style={{ "--utilization": `${utilization * 3.6}deg` } as CSSProperties}>
                 <div><strong>{utilization.toFixed(0)}%</strong><span>deployed</span></div>
               </div>
               <div className={styles.utilRows}>
@@ -280,7 +281,7 @@ export function PaperTradingTerminal() {
             </div>
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <thead><tr><th>Time</th><th>Station</th><th>Contract</th><th>Signal</th><th>Entry proxy</th><th>Latest YES ask</th><th>Reaction</th><th>Status</th></tr></thead>
+                <thead><tr><th>Time</th><th>Station</th><th>Contract</th><th>Signal</th><th>NO entry proxy</th><th>Latest YES ask</th><th>Reaction</th><th>Status</th></tr></thead>
                 <tbody>
                   {signals.map((signal) => (
                     <tr key={`${signal.station}-${signal.contractTicker}-${signal.triggeredAt}`}>
@@ -288,7 +289,7 @@ export function PaperTradingTerminal() {
                       <td><b>{signal.station}</b><small>{signal.city}</small></td>
                       <td><b>{signal.label}</b><small>{signal.contractTicker}</small></td>
                       <td><span className={styles.signalSide}>NO</span><small>{signal.triggerTemperatureF.toFixed(1)}°F trigger</small></td>
-                      <td>{cents(signal.noAskProxyCents ?? signal.entryYesAskCents)}</td>
+                      <td>{cents(signal.noAskProxyCents)}</td>
                       <td>{cents(signal.latestYesAskCents)}</td>
                       <td>{lag(signal.reactionLagSeconds)}</td>
                       <td><span className={`${styles.statusBadge} ${styles[signal.status]}`}>{signal.status.replace("_", " ")}</span></td>
