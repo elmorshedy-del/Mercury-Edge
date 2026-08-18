@@ -79,8 +79,12 @@ type ExecutionTrade = {
   positionCostBasis: number | null;
   lastMark: number | null;
   latestPrice: number | null;
+  liveBid: number | null;
+  liveAsk: number | null;
   latestPriceAt: string | null;
   latestExchangeAt: string | null;
+  lastTradePrice: number | null;
+  lastTradeAt: string | null;
   priceChange: number | null;
   priceChangePct: number | null;
   markPnl: number | null;
@@ -366,11 +370,11 @@ export function PaperTradingTerminal() {
           <section className={styles.tableCard}>
             <div className={styles.cardHeader}>
               <div><span>Actual paper execution</span><h2>Trades taken</h2></div>
-              <small>Live mark = executable Kalshi bid · refreshes every 5s</small>
+              <small>Kalshi L2 bid/ask + last trade · P&amp;L marks to executable bid · refreshes every 5s</small>
             </div>
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <thead><tr><th>Time</th><th>Station</th><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Latest Kalshi</th><th>Move</th><th>MTM P&amp;L</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
+                <thead><tr><th>Time</th><th>Station</th><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Kalshi quote</th><th>Move</th><th>MTM P&amp;L</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
                 <tbody>
                   {takenTrades.map((trade) => {
                     const moveClass = trade.priceChange !== null && trade.priceChange > 0
@@ -392,16 +396,20 @@ export function PaperTradingTerminal() {
                         <td><span className={styles.signalSide}>{trade.side.toUpperCase()}</span></td>
                         <td><b>{priceCents(trade.entryPrice)}</b><small>avg fill</small></td>
                         <td>
-                          <b>{priceCents(trade.latestPrice)}</b>
-                          <small>{trade.latestPriceAt ? `${clock(trade.latestPriceAt)} · ${age(trade.latestPriceAt, now)}` : "no executable bid"}</small>
+                          <b>BUY {priceCents(trade.liveAsk)} · SELL {priceCents(trade.liveBid)}</b>
+                          <small>
+                            LAST {priceCents(trade.lastTradePrice)}
+                            {trade.latestPriceAt ? ` · book ${clock(trade.latestPriceAt)} (${age(trade.latestPriceAt, now)})` : " · no L2 quote"}
+                            {trade.lastTradeAt ? ` · trade ${clock(trade.lastTradeAt)}` : ""}
+                          </small>
                         </td>
                         <td className={moveClass}>
                           <b>{signedPriceMove(trade.priceChange)}</b>
-                          <small>{signedPercent(trade.priceChangePct)}</small>
+                          <small>{signedPercent(trade.priceChangePct)} · vs sell bid</small>
                         </td>
                         <td className={pnlClass}>
                           <b>{signedMoney(trade.markPnl)}</b>
-                          <small>after entry fee · before exit fee</small>
+                          <small>at sell bid · after entry fee · before exit fee</small>
                         </td>
                         <td><b>{trade.filledQty.toFixed(2)}</b><small>req {trade.requestedQty.toFixed(2)}</small></td>
                         <td>{money(trade.grossCost)}</td>
