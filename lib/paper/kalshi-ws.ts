@@ -56,11 +56,7 @@ type RawWsEvents = {
   error: [error: Error];
 };
 
-/**
- * Minimal authenticated WebSocket client using Node's HTTPS upgrade path.
- * We intentionally do not negotiate permessage-deflate so replay receives the
- * exact UTF-8 JSON payloads sent by Kalshi without a compression dependency.
- */
+/** Independent protocol implementation used as a validation oracle. */
 export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
   private socket: Duplex | null = null;
   private buffer = Buffer.alloc(0);
@@ -83,10 +79,7 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
     const path = this.config.path ?? KALSHI_WS_PATH;
     const wsKey = randomBytes(16).toString("base64");
     const expectedAccept = createHash("sha1").update(wsKey + WS_GUID).digest("base64");
-    const auth = kalshiWsAuthHeaders({
-      keyId: this.config.keyId,
-      privateKeyPem: this.config.privateKeyPem,
-    });
+    const auth = kalshiWsAuthHeaders({ keyId: this.config.keyId, privateKeyPem: this.config.privateKeyPem });
 
     return new Promise<void>((resolve, reject) => {
       const request = https.request({
@@ -108,9 +101,7 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
         reject(error);
       };
       request.once("error", fail);
-      request.once("response", (response) => {
-        fail(new Error(`WEBSOCKET_UPGRADE_REJECTED status=${response.statusCode}`));
-      });
+      request.once("response", (response) => fail(new Error(`WEBSOCKET_UPGRADE_REJECTED status=${response.statusCode}`)));
       request.once("upgrade", (response, socket, head) => {
         request.removeListener("error", fail);
         const accept = response.headers["sec-websocket-accept"];
@@ -207,15 +198,13 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
       offset += 4;
     }
     if (this.buffer.length < offset + length) return false;
-    let payload = Buffer.from(this.buffer.subarray(offset, offset + length));
+    const payload = Buffer.from(this.buffer.subarray(offset, offset + length));
     this.buffer = this.buffer.subarray(offset + length);
     if (mask) {
       for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
     }
 
-    if (opcode >= 0x8 && (!fin || payload.length > 125)) {
-      return this.protocolError("BAD_CONTROL_FRAME");
-    }
+    if (opcode >= 0x8 && (!fin || payload.length > 125)) return this.protocolError("BAD_CONTROL_FRAME");
     this.handleFrame(opcode, fin, payload);
     return true;
   }
@@ -289,11 +278,6 @@ export function marketTickerOf(envelope: KalshiWsEnvelope) {
   return typeof ticker === "string" ? ticker : null;
 }
 
-/**
- * With use_yes_price=true, NO-side orderbook prices arrive on the YES-leg price
- * scale. Convert them back to native NO bid prices before mutating our internal
- * binary book. YES-side levels are unchanged.
- */
 export function normalizeNativePrice(side: "yes" | "no", rawPrice: string | number, useYesPrice: boolean) {
   const fp = parsePriceFp(rawPrice);
   return side === "no" && useYesPrice ? formatPriceFp(complementPriceFp(fp)) : formatPriceFp(fp);
