@@ -103,9 +103,14 @@ export function LiveMonitor() {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    // Defer the first async refresh to a timer callback so the effect itself does
+    // not synchronously drive state updates under React's effect lint rules.
+    const initial = window.setTimeout(() => void refresh(), 0);
     const timer = window.setInterval(() => void refresh(), 5_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [refresh]);
 
   const activeStations = useMemo(
