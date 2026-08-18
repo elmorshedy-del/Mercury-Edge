@@ -6,20 +6,69 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from stations import MARKET_SERIES, OMO_DEFAULT_NETWORKS, WEATHER_STATIONS
 
 
+def _canonical_pem(text: str) -> str | None:
+    normalized = text.strip().strip('"').strip("'").replace("\\n", "\n").replace("\r\n", "\n")
+    if "-----BEGIN " not in normalized or "PRIVATE KEY-----" not in normalized or "-----END " not in normalized:
+        return None
+    return normalized.rstrip() + "\n"
+
+
 def normalize_private_key_env(env: dict[str, str]) -> None:
-    """Accept either raw PEM or already-base64 PEM without logging key material."""
+    """Accept raw PEM or base64 PEM, including escaped-newline variants, without logging secrets."""
     value = env.get("KALSHI_PRIVATE_KEY_PEM_B64", "").strip()
     if not value:
         return
-    normalized = value.replace("\\n", "\n")
-    if "-----BEGIN " in normalized and "PRIVATE KEY-----" in normalized:
-        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(normalized.encode("utf-8")).decode("ascii")
+
+    raw_pem = _canonical_pem(value)
+    if raw_pem is not None:
+        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(raw_pem.encode("utf-8")).decode("ascii")
+        return
+
+    # A common Railway copy/paste case is base64 of a PEM that itself contains
+    # literal \n sequences. Decode, canonicalize, then re-encode once.
+    try:
+        decoded = base64.b64decode(value, validate=False).decode("utf-8")
+    except Exception:
+        return
+    decoded_pem = _canonical_pem(decoded)
+    if decoded_pem is not None:
+        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(decoded_pem.encode("utf-8")).decode("ascii")
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path not in ("/api/health", "/health", "/"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b'{"ok":true,"service":"mercury-paper-collector"}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def start_health_server() -> ThreadingHTTPServer | None:
+    port = int(os.getenv("PORT", "0") or "0")
+    if port <= 0:
+        return None
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, name="health-server", daemon=True)
+    thread.start()
+    print(json.dumps({"event": "paper_health_server_start", "port": port}))
+    return server
 
 
 def main() -> int:
@@ -33,6 +82,7 @@ def main() -> int:
         ",".join(f"{station}:{network}" for station, network in OMO_DEFAULT_NETWORKS.items()),
     )
     env.setdefault("IEM_OMO_POLL_SECONDS", "15")
+    health_server = start_health_server()
 
     child_specs = [
         ("kalshi", "collector.py", True),
@@ -41,7 +91,7 @@ def main() -> int:
         ("rules", "rule_collector.py", True),
         # One deterministic engine owns portfolio decisions for every strategy.
         # It is non-critical so evidence capture survives a strategy bug; the
-        # supervisor restarts it and the DB uniqueness guards prevent duplicates.
+        # supervisor restarts it and DB uniqueness guards prevent duplicates.
         ("paper_trader", "unified_engine.py", False),
         ("auditor", "audit_daemon.py", False),
     ]
@@ -103,6 +153,9 @@ def main() -> int:
                     child.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     child.kill()
+        if health_server is not None:
+            health_server.shutdown()
+            health_server.server_close()
         print(json.dumps({"event": "paper_runner_stop", "session_id": env["PAPER_SESSION_ID"], "exit_code": exit_code}))
     return exit_code
 
