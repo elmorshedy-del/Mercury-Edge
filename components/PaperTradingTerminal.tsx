@@ -78,6 +78,13 @@ type ExecutionTrade = {
   positionQty: number | null;
   positionCostBasis: number | null;
   lastMark: number | null;
+  latestPrice: number | null;
+  latestPriceAt: string | null;
+  latestExchangeAt: string | null;
+  priceChange: number | null;
+  priceChangePct: number | null;
+  markPnl: number | null;
+  markMethod: "executable_bid" | null;
 };
 
 type ExecutionPayload = {
@@ -96,12 +103,30 @@ function money(value: number) {
   }).format(value);
 }
 
+function signedMoney(value: number | null) {
+  if (value === null) return "—";
+  return `${value > 0 ? "+" : ""}${money(value)}`;
+}
+
 function cents(value: number | null) {
   return value === null ? "—" : `${Math.round(value)}¢`;
 }
 
 function priceCents(value: number | null) {
   return value === null ? "—" : `${(value * 100).toFixed(value * 100 < 10 ? 1 : 0)}¢`;
+}
+
+function signedPriceMove(value: number | null) {
+  if (value === null) return "—";
+  const move = value * 100;
+  const digits = Math.abs(move) < 10 ? 1 : 0;
+  return `${move > 0 ? "+" : ""}${move.toFixed(digits)}¢`;
+}
+
+function signedPercent(value: number | null) {
+  if (value === null) return "—";
+  const pct = value * 100;
+  return `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
 }
 
 function clock(value: string, timezone = "America/New_York") {
@@ -341,14 +366,23 @@ export function PaperTradingTerminal() {
           <section className={styles.tableCard}>
             <div className={styles.cardHeader}>
               <div><span>Actual paper execution</span><h2>Trades taken</h2></div>
-              <small>paper_orders · filled / partial only</small>
+              <small>Live mark = executable Kalshi bid · refreshes every 5s</small>
             </div>
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <thead><tr><th>Time</th><th>Station</th><th>Bucket</th><th>Strategy</th><th>Side</th><th>In</th><th>Out / mark</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
+                <thead><tr><th>Time</th><th>Station</th><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Latest Kalshi</th><th>Move</th><th>MTM P&amp;L</th><th>Qty</th><th>Cost</th><th>Fee</th><th>State</th></tr></thead>
                 <tbody>
                   {takenTrades.map((trade) => {
-                    const closed = trade.positionStatus === "closed" || trade.positionStatus === "settled";
+                    const moveClass = trade.priceChange !== null && trade.priceChange > 0
+                      ? styles.positive
+                      : trade.priceChange !== null && trade.priceChange < 0
+                        ? styles.negative
+                        : "";
+                    const pnlClass = trade.markPnl !== null && trade.markPnl > 0
+                      ? styles.positive
+                      : trade.markPnl !== null && trade.markPnl < 0
+                        ? styles.negative
+                        : "";
                     return (
                       <tr key={trade.id}>
                         <td>{clock(trade.decisionAt)}</td>
@@ -357,7 +391,18 @@ export function PaperTradingTerminal() {
                         <td><b>{strategyLabel(trade)}</b></td>
                         <td><span className={styles.signalSide}>{trade.side.toUpperCase()}</span></td>
                         <td><b>{priceCents(trade.entryPrice)}</b><small>avg fill</small></td>
-                        <td><b>{closed ? priceCents(trade.lastMark) : "—"}</b><small>{closed ? trade.positionStatus : trade.lastMark === null ? "open" : `mark ${priceCents(trade.lastMark)}`}</small></td>
+                        <td>
+                          <b>{priceCents(trade.latestPrice)}</b>
+                          <small>{trade.latestPriceAt ? `${clock(trade.latestPriceAt)} · ${age(trade.latestPriceAt, now)}` : "no executable bid"}</small>
+                        </td>
+                        <td className={moveClass}>
+                          <b>{signedPriceMove(trade.priceChange)}</b>
+                          <small>{signedPercent(trade.priceChangePct)}</small>
+                        </td>
+                        <td className={pnlClass}>
+                          <b>{signedMoney(trade.markPnl)}</b>
+                          <small>after entry fee · before exit fee</small>
+                        </td>
                         <td><b>{trade.filledQty.toFixed(2)}</b><small>req {trade.requestedQty.toFixed(2)}</small></td>
                         <td>{money(trade.grossCost)}</td>
                         <td>{money(trade.fee)}</td>
@@ -366,7 +411,7 @@ export function PaperTradingTerminal() {
                     );
                   })}
                   {!takenTrades.length && (
-                    <tr><td colSpan={11} className={styles.emptyRow}>No filled or partial paper orders for this portfolio in the current session.</td></tr>
+                    <tr><td colSpan={13} className={styles.emptyRow}>No filled or partial paper orders for this portfolio in the current session.</td></tr>
                   )}
                 </tbody>
               </table>
