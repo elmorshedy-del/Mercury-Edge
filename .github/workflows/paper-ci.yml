@@ -1,0 +1,39 @@
+name: Paper Trader CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - paper-trader-v1
+
+permissions:
+  contents: read
+
+jobs:
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  collector-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: paper_collector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: paper_collector/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile collector.py
+      - run: python -c "import websockets, cryptography, psycopg; print(websockets.__version__, cryptography.__version__, psycopg.__version__)"
+      - run: docker build -t mercury-paper-collector .
