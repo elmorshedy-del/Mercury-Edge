@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import os
 import signal
@@ -11,36 +12,68 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
 from stations import MARKET_SERIES, OMO_DEFAULT_NETWORKS, WEATHER_STATIONS
 
 
-def _canonical_pem(text: str) -> str | None:
-    normalized = text.strip().strip('"').strip("'").replace("\\n", "\n").replace("\r\n", "\n")
+def _canonical_pem_bytes(value: str) -> bytes | None:
+    normalized = value.strip().strip('"').strip("'").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
     if "-----BEGIN " not in normalized or "PRIVATE KEY-----" not in normalized or "-----END " not in normalized:
         return None
-    return normalized.rstrip() + "\n"
+    begin = normalized.find("-----BEGIN ")
+    return (normalized[begin:].rstrip() + "\n").encode("utf-8")
 
 
 def normalize_private_key_env(env: dict[str, str]) -> None:
-    """Accept raw PEM or base64 PEM, including escaped-newline variants, without logging secrets."""
-    value = env.get("KALSHI_PRIVATE_KEY_PEM_B64", "").strip()
-    if not value:
+    """Accept common RSA key encodings without logging key material.
+
+    Input may be raw/escaped PEM, base64(Pem), or base64(DER). Children always
+    receive base64 of a canonical unencrypted PKCS8 PEM.
+    """
+    raw = env.get("KALSHI_PRIVATE_KEY_PEM_B64", "").strip()
+    if not raw:
         return
 
-    raw_pem = _canonical_pem(value)
-    if raw_pem is not None:
-        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(raw_pem.encode("utf-8")).decode("ascii")
-        return
+    candidates: list[tuple[str, bytes]] = []
+    pem = _canonical_pem_bytes(raw)
+    if pem is not None:
+        candidates.append(("pem", pem))
 
-    # A common Railway copy/paste case is base64 of a PEM that itself contains
-    # literal \n sequences. Decode, canonicalize, then re-encode once.
+    compact = "".join(raw.strip().strip('"').strip("'").split())
     try:
-        decoded = base64.b64decode(value, validate=False).decode("utf-8")
-    except Exception:
-        return
-    decoded_pem = _canonical_pem(decoded)
-    if decoded_pem is not None:
-        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(decoded_pem.encode("utf-8")).decode("ascii")
+        decoded = base64.b64decode(compact, validate=True)
+        decoded_text = decoded.decode("utf-8", errors="ignore")
+        decoded_pem = _canonical_pem_bytes(decoded_text)
+        if decoded_pem is not None:
+            candidates.append(("pem", decoded_pem))
+        candidates.append(("der", decoded))
+    except (binascii.Error, ValueError):
+        pass
+
+    key = None
+    for kind, payload in candidates:
+        try:
+            key = (
+                serialization.load_pem_private_key(payload, password=None)
+                if kind == "pem"
+                else serialization.load_der_private_key(payload, password=None)
+            )
+        except (TypeError, ValueError):
+            continue
+        if key is not None:
+            break
+
+    if key is None or not isinstance(key, rsa.RSAPrivateKey):
+        raise RuntimeError("Configured Kalshi private key is not a parseable RSA private key")
+
+    canonical = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(canonical).decode("ascii")
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -49,7 +82,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        body = b'{"ok":true,"service":"mercury-paper-collector"}'
+        body = b'{"ok":true,"service":"mercury-paper-collector","real_money":false}'
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
