@@ -8,9 +8,13 @@ type ExecutionRow = {
   portfolio_id: string | null;
   mode_code: string | null;
   strategy_code: string;
+  strategy_display_name: string | null;
   station_code: string;
   event_ticker: string | null;
   market_ticker: string;
+  contract_label: string | null;
+  lower_bound_f: string | null;
+  upper_bound_f: string | null;
   outcome_side: "yes" | "no";
   status: "filled" | "partial";
   requested_qty: string;
@@ -47,9 +51,13 @@ export async function GET() {
          o.portfolio_id::text,
          p.mode_code,
          o.strategy_code,
+         sc.display_name AS strategy_display_name,
          s.station_code,
          s.event_ticker,
          o.market_ticker,
+         mc.label AS contract_label,
+         mc.lower_bound_f::text,
+         mc.upper_bound_f::text,
          o.outcome_side,
          o.status,
          o.requested_qty::text,
@@ -67,6 +75,8 @@ export async function GET() {
        FROM paper_orders o
        JOIN paper_signals s ON s.id = o.signal_id
        LEFT JOIN paper_portfolios p ON p.id = o.portfolio_id
+       LEFT JOIN paper_strategy_configs sc ON sc.strategy_code = o.strategy_code
+       LEFT JOIN market_contracts mc ON mc.ticker = o.market_ticker
        LEFT JOIN paper_positions pos
          ON pos.portfolio_id = o.portfolio_id
         AND pos.market_ticker = o.market_ticker
@@ -87,9 +97,13 @@ export async function GET() {
         portfolioId: row.portfolio_id,
         modeCode: row.mode_code,
         strategyCode: row.strategy_code,
+        strategyName: row.strategy_display_name,
         stationCode: row.station_code,
         eventTicker: row.event_ticker,
         marketTicker: row.market_ticker,
+        contractLabel: row.contract_label,
+        lowerBoundF: row.lower_bound_f === null ? null : Number(row.lower_bound_f),
+        upperBoundF: row.upper_bound_f === null ? null : Number(row.upper_bound_f),
         side: row.outcome_side,
         status: row.status,
         requestedQty: Number(row.requested_qty),
