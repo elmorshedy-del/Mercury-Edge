@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import signal
-import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -95,6 +94,7 @@ class JournalRow:
     received_epoch_ms: int
     received_epoch_ns: int
     received_monotonic_ns: int
+    raw_text: str
     payload: dict[str, Any]
     payload_sha256: str
 
@@ -155,15 +155,15 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
                                 INSERT INTO market_data_journal(
                                   session_id, channel, sid, seq, market_ticker, exchange_ts_ms,
                                   received_at, received_epoch_ms, received_epoch_ns, received_monotonic_ns,
-                                  payload, payload_sha256
-                                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                                  raw_text, payload, payload_sha256
+                                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
                                 ON CONFLICT DO NOTHING
                                 """,
                                 (
                                     SESSION_ID, item.channel, item.sid, item.seq, item.market_ticker,
                                     item.exchange_ts_ms, item.received_at, item.received_epoch_ms,
                                     str(item.received_epoch_ns), str(item.received_monotonic_ns),
-                                    json.dumps(item.payload, separators=(",", ":")), item.payload_sha256,
+                                    item.raw_text, json.dumps(item.payload, separators=(",", ":")), item.payload_sha256,
                                 ),
                             )
                         else:
@@ -199,6 +199,8 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
 
 
 async def journal_ws(queue: asyncio.Queue[JournalRow | AuditRow], raw_text: str) -> dict[str, Any]:
+    # Timestamp immediately after the WebSocket library yields the complete frame,
+    # before JSON parsing or DB work. Monotonic time is preserved separately.
     wall_ns = time.time_ns()
     mono_ns = time.monotonic_ns()
     raw_bytes = raw_text.encode()
@@ -216,6 +218,7 @@ async def journal_ws(queue: asyncio.Queue[JournalRow | AuditRow], raw_text: str)
         received_epoch_ms=wall_ns // 1_000_000,
         received_epoch_ns=wall_ns,
         received_monotonic_ns=mono_ns,
+        raw_text=raw_text,
         payload=data,
         payload_sha256=payload_hash(raw_bytes),
     )
@@ -230,7 +233,7 @@ async def journal_rest_orderbook(queue: asyncio.Queue[JournalRow | AuditRow], ti
     payload = await asyncio.to_thread(http_json, url)
     after_ns = time.time_ns()
     after_mono = time.monotonic_ns()
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    raw_text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     await queue.put(JournalRow(
         channel="rest_orderbook_crosscheck",
         sid=None,
@@ -241,8 +244,9 @@ async def journal_rest_orderbook(queue: asyncio.Queue[JournalRow | AuditRow], ti
         received_epoch_ms=after_ns // 1_000_000,
         received_epoch_ns=after_ns,
         received_monotonic_ns=after_mono,
+        raw_text=raw_text,
         payload={"request_started_epoch_ns": str(before_ns), "request_rtt_ns": str(after_mono - before_mono), "response": payload},
-        payload_sha256=payload_hash(canonical),
+        payload_sha256=payload_hash(raw_text.encode()),
     ))
 
 
@@ -342,9 +346,9 @@ async def run_ws(queue: asyncio.Queue[JournalRow | AuditRow], active_ref: dict[s
                                         {"sid": sid, "expected": prev + 1, "received": seq,
                                          "missing_from": prev + 1, "missing_to": seq - 1},
                                     ))
-                                    # The raw stream has permanent missing evidence.
-                                    # Re-snapshot every tracked market to restore a
-                                    # known-good state for subsequent paper signals.
+                                    # The missing message cannot be reconstructed.
+                                    # Re-snapshot every tracked market so subsequent
+                                    # paper signals can start from a new known state.
                                     if orderbook_sid is not None and current_markets:
                                         await ws.send(json.dumps({
                                             "id": int(time.time_ns() % 2_000_000_000),
@@ -404,17 +408,33 @@ async def main() -> None:
     ws_task = asyncio.create_task(run_ws(queue, active_ref), name="kalshi-ws")
     rest_task = asyncio.create_task(rest_crosscheck_loop(queue, active_ref), name="rest-crosscheck")
 
-    done, pending = await asyncio.wait({writer, ws_task, rest_task}, return_when=asyncio.FIRST_EXCEPTION)
-    for task in done:
-        exc = task.exception()
-        if exc:
-            print(json.dumps({"event": "paper_collector_fatal", "task": task.get_name(), "error": repr(exc)}))
+    try:
+        # A writer failure is fatal because unjournaled market data invalidates
+        # the evidence stream. A collector task failure also propagates.
+        done, _ = await asyncio.wait({writer, ws_task, rest_task}, return_when=asyncio.FIRST_EXCEPTION)
+        failures = [(task.get_name(), task.exception()) for task in done if not task.cancelled() and task.exception()]
+        if failures:
             stop_event.set()
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-    await queue.join()
-    print(json.dumps({"event": "paper_collector_stop", "session_id": SESSION_ID}))
+            for name, exc in failures:
+                print(json.dumps({"event": "paper_collector_fatal", "task": name, "error": repr(exc)}))
+            raise RuntimeError("; ".join(f"{name}: {exc!r}" for name, exc in failures))
+    finally:
+        stop_event.set()
+        # Stop producers first so the writer can drain every item already timestamped.
+        for task in (ws_task, rest_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(ws_task, rest_task, return_exceptions=True)
+
+        if not writer.done():
+            try:
+                await asyncio.wait_for(queue.join(), timeout=15)
+            except asyncio.TimeoutError:
+                print(json.dumps({"event": "paper_collector_fatal", "task": "db-writer", "error": "journal drain timeout"}))
+                writer.cancel()
+            await asyncio.gather(writer, return_exceptions=True)
+
+        print(json.dumps({"event": "paper_collector_stop", "session_id": SESSION_ID}))
 
 
 if __name__ == "__main__":
