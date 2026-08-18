@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY collector.py ./collector.py
-RUN python -m py_compile collector.py
+COPY collector.py weather_collector.py audit_replay.py runner.py ./
+RUN python -m py_compile collector.py weather_collector.py audit_replay.py runner.py
 
-CMD ["python", "collector.py"]
+CMD ["python", "runner.py"]
