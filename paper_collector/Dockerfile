@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY collector.py weather_collector.py omo_collector.py rule_collector.py paper_engine.py strategy_engines.py strategy_runtime.py unified_engine.py status_reporter.py audit_replay.py audit_daemon.py runner.py stations.py market_calendar.py ./
-RUN python -m py_compile collector.py weather_collector.py omo_collector.py rule_collector.py paper_engine.py strategy_engines.py strategy_runtime.py unified_engine.py status_reporter.py audit_replay.py audit_daemon.py runner.py stations.py market_calendar.py
+COPY collector.py weather_collector.py omo_collector.py rule_collector.py paper_engine.py paper_engine_hardened.py strategy_engines.py strategy_runtime.py strategy_runtime_hardened.py shadow_lab.py risk_controls.py portfolio_monitor.py unified_engine.py status_reporter.py audit_replay.py audit_daemon.py runner.py stations.py market_calendar.py ./
+RUN python -m py_compile collector.py weather_collector.py omo_collector.py rule_collector.py paper_engine.py paper_engine_hardened.py strategy_engines.py strategy_runtime.py strategy_runtime_hardened.py shadow_lab.py risk_controls.py portfolio_monitor.py unified_engine.py status_reporter.py audit_replay.py audit_daemon.py runner.py stations.py market_calendar.py
 
 CMD ["python", "runner.py"]
