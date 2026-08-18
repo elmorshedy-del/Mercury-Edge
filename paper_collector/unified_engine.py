@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
@@ -21,6 +22,39 @@ STOP = False
 def stop(*_: object) -> None:
     global STOP
     STOP = True
+
+
+def weather_is_fresh_for_live_trade(weather: dict[str, Any], global_cfg: dict[str, Any]) -> tuple[bool, str | None]:
+    """Keep catch-up/backfilled weather for research but never trade it as live."""
+    observed = weather.get("observed_at")
+    first_seen = weather.get("first_seen_at")
+    if not isinstance(observed, datetime) or not isinstance(first_seen, datetime):
+        return False, "MISSING_WEATHER_TIMESTAMPS"
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    if first_seen.tzinfo is None:
+        first_seen = first_seen.replace(tzinfo=timezone.utc)
+
+    source = str(weather.get("source") or "")
+    if source == "IEM_MADIS_OMO":
+        source_max = float(global_cfg.get("omo_live_max_source_age_seconds", 90))
+    elif source == "NOAA_AWC":
+        source_max = float(global_cfg.get("awc_live_max_source_age_seconds", 300))
+    else:
+        source_max = float(global_cfg.get("weather_live_max_source_age_seconds", 180))
+    processing_max = float(global_cfg.get("paper_live_max_processing_age_seconds", 30))
+
+    source_age = (first_seen - observed).total_seconds()
+    processing_age = (datetime.now(timezone.utc) - first_seen.astimezone(timezone.utc)).total_seconds()
+    if source_age < -5:
+        return False, "OBSERVATION_TIMESTAMP_IN_FUTURE"
+    if source_age > source_max:
+        return False, "CATCHUP_WEATHER_TOO_OLD"
+    if processing_age < -5:
+        return False, "FIRST_SEEN_TIMESTAMP_IN_FUTURE"
+    if processing_age > processing_max:
+        return False, "ENGINE_BACKLOG_TOO_OLD"
+    return True, None
 
 
 def main() -> int:
@@ -76,22 +110,31 @@ def main() -> int:
                 time.sleep(max(0.05, POLL_MS / 1000 - elapsed))
                 continue
 
+            stale_counts: dict[str, int] = {}
             for raw in rows:
                 weather = dbn.weather_row(raw)
                 try:
                     with conn.transaction():
-                        # Deliberate capital priority: proven DBN gets first claim,
-                        # then the research strategies use the remaining mode caps.
-                        dbn_count = dbn.process_weather(conn, weather)
-                        modes = dbn.load_modes(conn)
                         global_cfg = dbn.load_global(conn)
-                        extra_count = execute_extra_strategies(
-                            conn,
-                            SESSION_ID,
-                            weather,
-                            modes,
-                            global_cfg,
-                        )
+                        fresh, stale_reason = weather_is_fresh_for_live_trade(weather, global_cfg)
+                        if fresh:
+                            # Proven DBN gets first claim; research strategies use
+                            # the remaining per-mode/event/region/day capacity.
+                            dbn_count = dbn.process_weather(conn, weather)
+                            modes = dbn.load_modes(conn)
+                            extra_count = execute_extra_strategies(
+                                conn,
+                                SESSION_ID,
+                                weather,
+                                modes,
+                                global_cfg,
+                            )
+                        else:
+                            dbn_count = 0
+                            extra_count = 0
+                            reason = stale_reason or "STALE_WEATHER"
+                            stale_counts[reason] = stale_counts.get(reason, 0) + 1
+
                         conn.execute(
                             """
                             UPDATE paper_engine_state
@@ -125,6 +168,12 @@ def main() -> int:
                         )
 
             conn.commit()
+            if stale_counts:
+                print(json.dumps({
+                    "event": "stale_weather_catchup_skipped",
+                    "session_id": SESSION_ID,
+                    "counts": stale_counts,
+                }))
 
     print(json.dumps({"event": "unified_paper_engine_stop", "session_id": SESSION_ID}))
     return 0
