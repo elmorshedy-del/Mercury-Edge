@@ -8,6 +8,8 @@ const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 export const KALSHI_WS_PATH = "/trade-api/ws/v2";
 export const KALSHI_WS_HOST = "external-api-ws.kalshi.com";
 
+type AnyBuffer = Buffer<ArrayBufferLike>;
+
 export type KalshiWsEnvelope = {
   id?: number;
   type?: string;
@@ -59,9 +61,9 @@ type RawWsEvents = {
 /** Independent protocol implementation used as a validation oracle. */
 export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
   private socket: Duplex | null = null;
-  private buffer = Buffer.alloc(0);
+  private buffer: AnyBuffer = Buffer.alloc(0);
   private fragmentedOpcode: number | null = null;
-  private fragments: Buffer[] = [];
+  private fragments: AnyBuffer[] = [];
   private closing = false;
 
   constructor(private readonly config: {
@@ -142,7 +144,7 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
     setTimeout(() => this.socket?.destroy(), 1_000).unref();
   }
 
-  private sendFrame(opcode: number, payload: Buffer) {
+  private sendFrame(opcode: number, payload: AnyBuffer) {
     if (!this.socket) throw new Error("WEBSOCKET_NOT_CONNECTED");
     const mask = randomBytes(4);
     const header: number[] = [0x80 | opcode];
@@ -162,7 +164,7 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
     this.socket.write(Buffer.concat([Buffer.from(header), mask, masked]));
   }
 
-  private feed(chunk: Buffer) {
+  private feed(chunk: AnyBuffer) {
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
     while (this.tryFrame()) { /* drain */ }
   }
@@ -191,14 +193,14 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
       offset += 8;
     }
 
-    let mask: Buffer | null = null;
+    let mask: AnyBuffer | null = null;
     if (masked) {
       if (this.buffer.length < offset + 4) return false;
       mask = this.buffer.subarray(offset, offset + 4);
       offset += 4;
     }
     if (this.buffer.length < offset + length) return false;
-    const payload = Buffer.from(this.buffer.subarray(offset, offset + length));
+    const payload: AnyBuffer = Buffer.from(this.buffer.subarray(offset, offset + length));
     this.buffer = this.buffer.subarray(offset + length);
     if (mask) {
       for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
@@ -209,7 +211,7 @@ export class RawKalshiWebSocket extends EventEmitter<RawWsEvents> {
     return true;
   }
 
-  private handleFrame(opcode: number, fin: boolean, payload: Buffer) {
+  private handleFrame(opcode: number, fin: boolean, payload: AnyBuffer) {
     if (opcode === 0x9) {
       this.sendFrame(0xA, payload);
       return;
