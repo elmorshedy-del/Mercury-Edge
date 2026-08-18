@@ -8,10 +8,26 @@ import sys
 import time
 import uuid
 
+from stations import MARKET_SERIES, OMO_DEFAULT_NETWORKS, WEATHER_STATIONS
+
 
 def main() -> int:
     env = os.environ.copy()
     env.setdefault("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
+
+    # Collect broadly while keeping the expensive high-frequency IEM path focused.
+    # Environment variables still override every default for deployment experiments.
+    env.setdefault("SERIES_TICKERS", ",".join(MARKET_SERIES))
+    env.setdefault("WEATHER_STATIONS", ",".join(WEATHER_STATIONS))
+    env.setdefault(
+        "OMO_STATION_NETWORKS",
+        ",".join(f"{station}:{network}" for station, network in OMO_DEFAULT_NETWORKS.items()),
+    )
+    # IEM is a research/first-seen path, not our intended final low-latency feed.
+    # Ten priority stations at 15s avoids unnecessary request pressure while still
+    # resolving public-feed arrival to a useful sub-minute interval.
+    env.setdefault("IEM_OMO_POLL_SECONDS", "15")
+
     child_specs = [
         ("kalshi", "collector.py", True),
         ("awc", "weather_collector.py", True),
@@ -27,6 +43,11 @@ def main() -> int:
     print(json.dumps({
         "event": "paper_runner_start",
         "session_id": env["PAPER_SESSION_ID"],
+        "market_series_count": len(MARKET_SERIES),
+        "weather_station_count": len(WEATHER_STATIONS),
+        "omo_priority_count": len(OMO_DEFAULT_NETWORKS),
+        "weather_stations": list(WEATHER_STATIONS),
+        "omo_priority_stations": list(OMO_DEFAULT_NETWORKS),
         "children": [{"name": name, "critical": critical} for name, _, critical in child_specs],
     }))
 
