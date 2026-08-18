@@ -81,14 +81,14 @@ async function main() {
     observations: string;
     quotes: string;
   }>(
-    `SELECT d.trade_date::text,
+    `SELECT d.trade_date::date::text,
             count(DISTINCT e.event_ticker)::text AS events,
             count(DISTINCT w.id)::text AS observations,
             count(DISTINCT q.contract_ticker || '|' || q.captured_at::text)::text AS quotes
        FROM generate_series($1::date,$2::date,interval '1 day') d(trade_date)
-       LEFT JOIN market_events e ON e.trade_date=d.trade_date
+       LEFT JOIN market_events e ON e.trade_date=d.trade_date::date
        LEFT JOIN weather_observations w ON w.station_code=e.station_code
-         AND (w.observed_at AT TIME ZONE 'UTC')::date BETWEEN d.trade_date-1 AND d.trade_date+1
+         AND (w.observed_at AT TIME ZONE 'UTC')::date BETWEEN (d.trade_date::date - 1) AND (d.trade_date::date + 1)
        LEFT JOIN market_contracts mc ON mc.event_ticker=e.event_ticker
        LEFT JOIN market_quotes q ON q.contract_ticker=mc.ticker
       GROUP BY d.trade_date ORDER BY d.trade_date`,
