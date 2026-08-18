@@ -35,27 +35,31 @@ def global_config(conn: psycopg.Connection[Any]) -> dict[str, Any]:
 
 
 def settlement_results(conn: psycopg.Connection[Any]) -> dict[str, str]:
+    """Only finalized, non-provisional Kalshi results may recycle benchmark cash."""
     rows = conn.execute(
         """
-        SELECT DISTINCT ON (event_ticker) event_ticker,raw_payload
-          FROM settlement_rule_snapshots
-         WHERE session_id=%s AND event_ticker IS NOT NULL
-         ORDER BY event_ticker,captured_at DESC,id DESC
+        SELECT market_ticker,result
+          FROM paper_market_results
+         WHERE market_status='finalized'
+           AND result IN ('yes','no')
+           AND is_provisional IS DISTINCT FROM true
+        """
+    ).fetchall()
+    return {str(ticker): str(result) for ticker, result in rows}
+
+
+def market_feed_ok(conn: psycopg.Connection[Any]) -> bool:
+    """Fail closed unless the latest Kalshi WS lifecycle finding is connected."""
+    row = conn.execute(
+        """
+        SELECT finding_code
+          FROM audit_findings
+         WHERE session_id=%s AND component='kalshi_ws'
+         ORDER BY id DESC LIMIT 1
         """,
         (SESSION_ID,),
-    ).fetchall()
-    results: dict[str, str] = {}
-    for _, raw_payload in rows:
-        payload = raw_payload if isinstance(raw_payload, dict) else {}
-        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-        for market in event.get("markets") or []:
-            if not isinstance(market, dict):
-                continue
-            ticker = str(market.get("ticker") or "")
-            result = str(market.get("result") or "").lower()
-            if ticker and result in ("yes", "no"):
-                results[ticker] = result
-    return results
+    ).fetchone()
+    return bool(row and str(row[0]) == "WS_CONNECTED")
 
 
 def settle_open_positions(conn: psycopg.Connection[Any], results: dict[str, str]) -> int:
@@ -143,6 +147,30 @@ def settle_shadow_trials(conn: psycopg.Connection[Any], results: dict[str, str])
     return settled
 
 
+def risk_policy(
+    drawdown: Decimal,
+    mark_complete: bool,
+    mode_config: dict[str, Any],
+    cfg: dict[str, Any],
+) -> tuple[str, Decimal]:
+    policy = mode_config.get("drawdown_policy") if isinstance(mode_config.get("drawdown_policy"), dict) else {}
+    caution = d(policy.get("caution", 0.05))
+    reduced = d(policy.get("reduced", 0.10))
+    pause = d(policy.get("pause", 0.20))
+    caution_mult = d(policy.get("caution_multiplier", 0.75))
+    reduced_mult = d(policy.get("reduced_multiplier", 0.50))
+
+    if not mark_complete and bool(cfg.get("mark_incomplete_blocks_new_entries", True)):
+        return "mark_incomplete", ZERO
+    if drawdown >= pause:
+        return "paused", ZERO
+    if drawdown >= reduced:
+        return "reduced", reduced_mult
+    if drawdown >= caution:
+        return "caution", caution_mult
+    return "normal", ONE
+
+
 def mark_portfolio(
     conn: psycopg.Connection[Any],
     portfolio_id: int,
@@ -151,7 +179,8 @@ def mark_portfolio(
     mode_config: dict[str, Any],
     cfg: dict[str, Any],
     now_ms: int,
-) -> tuple[Decimal, Decimal, Decimal, str, bool, list[str]]:
+    feed_ok: bool,
+) -> tuple[Decimal, Decimal, Decimal, str, bool, list[str], Decimal, Decimal]:
     positions = conn.execute(
         """
         SELECT id,market_ticker,outcome_side,qty,last_mark
@@ -165,6 +194,11 @@ def mark_portfolio(
     mark_value = ZERO
     missing: list[str] = []
     for position_id, ticker, side, qty, last_mark in positions:
+        if not feed_ok:
+            missing.append(str(ticker))
+            fallback = d(last_mark) if last_mark is not None else ZERO
+            mark_value += fallback * d(qty)
+            continue
         book = se.reconstruct_full_book(conn, SESSION_ID, str(ticker), now_ms)
         mark = se.best_bid(book, str(side)) if book else None
         if mark is None:
@@ -186,26 +220,8 @@ def mark_portfolio(
     previous_high = d(previous[0]) if previous else starting_bankroll
     high_water = max(starting_bankroll, previous_high, equity)
     drawdown = ZERO if high_water <= 0 else max(ZERO, (high_water - equity) / high_water)
-
-    mark_complete = not missing
-    policy = mode_config.get("drawdown_policy") if isinstance(mode_config.get("drawdown_policy"), dict) else {}
-    caution = d(policy.get("caution", 0.05))
-    reduced = d(policy.get("reduced", 0.10))
-    pause = d(policy.get("pause", 0.20))
-    caution_mult = d(policy.get("caution_multiplier", 0.75))
-    reduced_mult = d(policy.get("reduced_multiplier", 0.50))
-
-    if not mark_complete and bool(cfg.get("mark_incomplete_blocks_new_entries", True)):
-        state, multiplier = "mark_incomplete", ZERO
-    elif drawdown >= pause:
-        state, multiplier = "paused", ZERO
-    elif drawdown >= reduced:
-        state, multiplier = "reduced", reduced_mult
-    elif drawdown >= caution:
-        state, multiplier = "caution", caution_mult
-    else:
-        state, multiplier = "normal", ONE
-
+    mark_complete = feed_ok and not missing
+    state, multiplier = risk_policy(drawdown, mark_complete, mode_config, cfg)
     return mark_value, equity, high_water, state, mark_complete, missing, drawdown, multiplier
 
 
@@ -222,6 +238,7 @@ def update_risk_states(conn: psycopg.Connection[Any], cfg: dict[str, Any]) -> in
     ).fetchall()
     now = datetime.now(timezone.utc)
     now_ms = int(now.timestamp() * 1000)
+    feed_ok = market_feed_ok(conn)
     updated = 0
     for portfolio_id, start, cash, mode_config in rows:
         config = dict(mode_config) if isinstance(mode_config, dict) else {}
@@ -233,6 +250,7 @@ def update_risk_states(conn: psycopg.Connection[Any], cfg: dict[str, Any]) -> in
             config,
             cfg,
             now_ms,
+            feed_ok,
         )
         conn.execute(
             """
@@ -268,7 +286,7 @@ def update_risk_states(conn: psycopg.Connection[Any], cfg: dict[str, Any]) -> in
                 multiplier,
                 state,
                 mark_complete,
-                json.dumps({"missing_marks": missing}, separators=(",", ":")),
+                json.dumps({"missing_marks": missing, "ws_connected": feed_ok}, separators=(",", ":")),
             ),
         )
         updated += 1
