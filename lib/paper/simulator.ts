@@ -1,5 +1,5 @@
 import { predictionTakerFeesForFills, type FeeFillBreakdown, type FeeType } from "./fees";
-import { consumeAsTaker, type BookSide, type KalshiOrderBook, type SimulatedFill } from "./orderbook";
+import { consumeAsTaker, KalshiOrderBook, type BookSide, type SimulatedFill } from "./orderbook";
 
 export const DEFAULT_LATENCY_LADDER_MS = [0, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000] as const;
 
@@ -46,9 +46,6 @@ export function executeTakerAtBook(input: {
   const arrivalEpochMs = intent.decisionEpochMs + latencyMs;
   const snap = book.snapshot();
 
-  // A replay may use a book state older than the arrival if no intervening book
-  // event occurred. What is forbidden is using a state from the future or one
-  // not known to remain valid through the arrival instant.
   if (snap.receivedEpochMs > arrivalEpochMs) {
     return blocked(intent, latencyMs, snap.receivedEpochMs, stateKnownThroughEpochMs, snap.seq, "FUTURE_BOOK_LEAKAGE");
   }
@@ -193,13 +190,27 @@ export type PendingPaperOrder = {
   executed: boolean;
 };
 
+/** Deep copy a reconstructed market state so future live deltas cannot mutate history. */
+function immutableBookCopy(source: KalshiOrderBook) {
+  const snap = source.snapshot();
+  const copy = new KalshiOrderBook(snap.marketTicker);
+  copy.applySnapshot({
+    seq: snap.seq,
+    exchangeTsMs: snap.exchangeTsMs,
+    receivedEpochMs: snap.receivedEpochMs,
+    yes: snap.yesBids.map((level) => [level.price, level.qty]),
+    no: snap.noBids.map((level) => [level.price, level.qty]),
+  });
+  return copy;
+}
+
 /**
  * Deterministic event-time replay.
  *
- * The engine owns the last reconstructed book for each ticker. Before applying a
- * new book event at T, orders arriving strictly before T execute against the
- * previous state, which by definition remained unchanged through their arrival.
- * Orders arriving exactly at T execute after the update (conservative tie-break).
+ * Before applying a new book event at T, orders arriving strictly before T
+ * execute against the immutable previous state. Orders arriving exactly at T
+ * execute after the update (conservative tie-break). The engine deep-copies
+ * every checkpoint to prevent a mutable live book from leaking future deltas.
  */
 export class LatencyReplayEngine {
   private pending: PendingPaperOrder[] = [];
@@ -213,7 +224,7 @@ export class LatencyReplayEngine {
   onBookUpdate(book: KalshiOrderBook, receivedEpochMs: number) {
     if (receivedEpochMs < this.nowMs) throw new Error(`REPLAY_TIME_REVERSAL ${receivedEpochMs} < ${this.nowMs}`);
     const executions = this.executeDue(receivedEpochMs, false);
-    this.books.set(book.marketTicker, book);
+    this.books.set(book.marketTicker, immutableBookCopy(book));
     this.nowMs = receivedEpochMs;
     executions.push(...this.executeDue(receivedEpochMs, true));
     return executions;
@@ -253,5 +264,4 @@ export class LatencyReplayEngine {
   }
 }
 
-// Backward name retained for imports; semantics are the corrected event-time replay.
 export const LatencyReplayQueue = LatencyReplayEngine;
