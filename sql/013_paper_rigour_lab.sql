@@ -58,8 +58,15 @@ CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
 CREATE INDEX IF NOT EXISTS paper_equity_snapshots_time_idx
   ON paper_equity_snapshots(captured_at DESC, portfolio_id);
 
+-- Every aggressiveness mode is an independent alternative universe.  They all
+-- begin at exactly $1,000; no cash or exposure is shared between portfolio IDs.
+UPDATE paper_portfolio_mode_configs
+SET starting_bankroll=1000.00,
+    updated_at=now()
+WHERE enabled;
+
 -- Drawdown thresholds differ deliberately by sleeve.  These are benchmark risk
--- policies, not claims of optimality; the shadow lab will let us compare them.
+-- policies, not claims of optimality; the shadow lab lets us compare alternatives.
 UPDATE paper_portfolio_mode_configs
 SET config = config || CASE mode_code
   WHEN 'conservative' THEN '{"drawdown_policy":{"caution":0.04,"reduced":0.08,"pause":0.12,"caution_multiplier":0.65,"reduced_multiplier":0.35}}'::jsonb
@@ -72,6 +79,11 @@ SET config = config || CASE mode_code
 END,
 updated_at=now();
 
+UPDATE paper_strategy_configs
+SET config = config || '{"prior_max_age_seconds":180}'::jsonb,
+    updated_at=now()
+WHERE strategy_code='RMO';
+
 UPDATE paper_global_config
 SET config = config || '{
   "strict_shadow_isolation":true,
@@ -79,6 +91,7 @@ SET config = config || '{
   "experiment_latency_ladder_ms":[0,10,25,50,100,250,500,1000,2000,5000],
   "experiment_budget_ladder":[10,25,50,100,200],
   "drawdown_risk_enabled":true,
+  "risk_state_max_age_seconds":30,
   "mark_incomplete_blocks_new_entries":true,
   "settlement_cash_recycling":true
 }'::jsonb,
