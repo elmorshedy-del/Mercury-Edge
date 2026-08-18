@@ -10,14 +10,13 @@ from typing import Any
 import psycopg
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-AUDITOR_VERSION = os.getenv("AUDITOR_VERSION", "python-decimal-v2")
+AUDITOR_VERSION = os.getenv("AUDITOR_VERSION", "python-decimal-v3")
 SESSION_ID = os.getenv("AUDIT_SESSION_ID")
 ONE = Decimal("1")
 
 
 class Book:
     def __init__(self) -> None:
-        # Internal representation is always native outcome-leg bid pricing.
         self.yes: dict[Decimal, Decimal] = {}
         self.no: dict[Decimal, Decimal] = {}
 
@@ -39,12 +38,7 @@ class Book:
             price = ONE - price
         return price
 
-    def snapshot(
-        self,
-        yes: list[list[str]],
-        no: list[list[str]],
-        price_mode: str | None,
-    ) -> None:
+    def snapshot(self, yes: list[list[str]], no: list[list[str]], price_mode: str | None) -> None:
         self.yes.clear()
         self.no.clear()
         for price, qty in yes:
@@ -63,7 +57,6 @@ class Book:
         self.validate()
 
     def validate(self) -> None:
-        # Native outcome-leg pricing: YES bid x and NO bid y cannot cross x+y>1.
         if self.yes and self.no and max(self.yes) + max(self.no) > ONE:
             raise ValueError(f"crossed binary book: yes={max(self.yes)} no={max(self.no)}")
 
@@ -100,12 +93,14 @@ def resolve_session(conn: psycopg.Connection[Any]) -> str:
 
 
 def run() -> int:
-    with psycopg.connect(DATABASE_URL) as conn:
-        session_id = resolve_session(conn)
-
-        # Freeze a consistent journal prefix even if the live collector continues writing.
+    # Use explicit autocommit so SET TRANSACTION is guaranteed to be the first
+    # statement inside the replay snapshot transaction. The prior implementation
+    # resolved a session first, implicitly starting a transaction and making the
+    # isolation-level SET invalid in psycopg/Postgres.
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         with conn.transaction():
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            session_id = resolve_session(conn)
             rows = conn.execute(
                 """
                 SELECT id, channel, sid, seq, market_ticker, raw_text, payload_sha256,
@@ -143,8 +138,6 @@ def run() -> int:
                 })
             chain = global_chain_update(chain, int(row_id), str(expected_sha))
 
-            # New v1.1 WebSocket rows are chained by connection. This detects
-            # deletion, insertion, reordering, or mutation independent of DB IDs.
             if connection_id:
                 expected_prev = last_connection_chain.get(connection_id)
                 if (prev_chain_hash or None) != (expected_prev or None):
@@ -285,7 +278,6 @@ def run() -> int:
                 json.dumps(summary, separators=(",", ":")),
             ),
         ).fetchone()[0]
-        conn.commit()
 
         print(json.dumps({
             "replay_id": replay_id,
