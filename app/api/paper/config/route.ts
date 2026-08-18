@@ -4,7 +4,9 @@ import { pool, transaction } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-const PAPER_EXECUTABLE_STRATEGIES = new Set(["DBN"]);
+const PAPER_EXECUTABLE_STRATEGIES = new Set([
+  "DBN", "DSN", "SBK", "HSR", "WTY", "RMO", "PRV", "LVP", "HMF",
+]);
 
 type ModePatch = {
   modeCode: string;
@@ -164,7 +166,7 @@ export async function PUT(request: NextRequest) {
   );
   if (unsupportedTrade) {
     return NextResponse.json(
-      { error: `${unsupportedTrade.strategyCode} does not have a validated paper execution engine yet; keep it shadow-only` },
+      { error: `${unsupportedTrade.strategyCode} is not part of the paper execution registry` },
       { status: 400 },
     );
   }
