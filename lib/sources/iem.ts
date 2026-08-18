@@ -43,7 +43,11 @@ export async function getHighFrequencyArchive(
       receivedAt: discoveredAt.toISOString(),
       receiptQuality: "discovery_only",
       temperatureF: cToF(tempC),
-      settlementCompatible: true,
+      // OMO/MADISHF is exactly the upstream feed we want to study, but the
+      // semantics of its T field versus the versioned Kalshi settlement source
+      // are not yet proven. Never turn an archived high-frequency print into a
+      // riskless hard-state trade merely because it came from MADIS.
+      settlementCompatible: false,
       rawText: match[1],
     });
   }
