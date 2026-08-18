@@ -101,16 +101,21 @@ function dateTime(value?: string | null) {
 
 function dateOnly(value?: string | null) {
   if (!value) return "—";
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value;
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(new Date(value));
+  }).format(new Date(normalized));
 }
 
 function resultLabel(outcome: string | null) {
   if (!outcome) return "Open";
   return outcome.charAt(0).toUpperCase() + outcome.slice(1);
+}
+
+function resultClass(outcome: string | null) {
+  return outcome === "win" ? styles.pass : styles.diagnostic;
 }
 
 export function BacktestReport({ results }: { results: ResultsPayload }) {
@@ -218,7 +223,7 @@ export function BacktestReport({ results }: { results: ResultsPayload }) {
                 <div className={styles.tableHead}><span>Station</span><span>Date</span><span>Contract</span><span>Trigger</span><span>Entry</span><span>Lag</span><span>Result</span><span>Net</span></div>
                 {results.signals.map((signal) => (
                   <div className={styles.tableRow} key={signal.id}>
-                    <span><b>{signal.station}</b></span><span>{dateOnly(signal.date)}</span><span title={signal.contract}>{signal.contract}</span><span>{dateTime(signal.triggeredAt)}</span><span>{cents(signal.entryCents)}</span><span>{seconds(signal.reactionLagSeconds)}</span><span><i className={signal.executable ? styles.pass : styles.diagnostic}>{resultLabel(signal.outcome)}</i></span><span>{dollars(signal.netProfit)}</span>
+                    <span><b>{signal.station}</b></span><span>{dateOnly(signal.date)}</span><span title={signal.contract}>{signal.contract}</span><span>{dateTime(signal.triggeredAt)}</span><span>{cents(signal.entryCents)}</span><span>{seconds(signal.reactionLagSeconds)}</span><span><i className={resultClass(signal.outcome)}>{resultLabel(signal.outcome)}</i></span><span>{dollars(signal.netProfit)}</span>
                   </div>
                 ))}
               </div>
@@ -226,7 +231,7 @@ export function BacktestReport({ results }: { results: ResultsPayload }) {
             <div className={styles.mobileCards}>
               {results.signals.map((signal) => (
                 <article key={signal.id}>
-                  <header><strong>{signal.station} · {signal.contract}</strong><i className={signal.executable ? styles.pass : styles.diagnostic}>{resultLabel(signal.outcome)}</i></header>
+                  <header><strong>{signal.station} · {signal.contract}</strong><i className={resultClass(signal.outcome)}>{resultLabel(signal.outcome)}</i></header>
                   <div><span>Date <b>{dateOnly(signal.date)}</b></span><span>Entry <b>{cents(signal.entryCents)}</b></span><span>Lag <b>{seconds(signal.reactionLagSeconds)}</b></span><span>Net <b>{dollars(signal.netProfit)}</b></span></div>
                   <small>Triggered {dateTime(signal.triggeredAt)} · {signal.executable ? "execution gate passed" : "diagnostic only"}</small>
                 </article>
