@@ -23,12 +23,14 @@ WS_URL = os.getenv("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/
 REST_BASE = os.getenv("KALSHI_REST_BASE", "https://external-api.kalshi.com/trade-api/v2")
 SERIES = [x.strip() for x in os.getenv("SERIES_TICKERS", "KXHIGHNY,KXHIGHPHIL,KXHIGHLAX").split(",") if x.strip()]
 DISCOVERY_SECONDS = max(5.0, float(os.getenv("MARKET_DISCOVERY_SECONDS", "15")))
-REST_CROSSCHECK_SECONDS = max(2.0, float(os.getenv("REST_CROSSCHECK_SECONDS", "10")))
-MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1")
+REST_CROSSCHECK_SECONDS = max(5.0, float(os.getenv("REST_CROSSCHECK_SECONDS", "30")))
+MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1.1")
 SESSION_ID = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
 DB_QUEUE_MAX = int(os.getenv("DB_QUEUE_MAX", "100000"))
 DB_BATCH_MAX = int(os.getenv("DB_BATCH_MAX", "250"))
 DB_BATCH_WAIT_MS = float(os.getenv("DB_BATCH_WAIT_MS", "20"))
+PRICE_MODE = "unified_yes"
+USE_YES_PRICE = True
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 KEY_ID = os.environ["KALSHI_API_KEY_ID"]
@@ -37,8 +39,25 @@ PRIVATE_KEY_B64 = os.environ["KALSHI_PRIVATE_KEY_PEM_B64"]
 PRIVATE_KEY = serialization.load_pem_private_key(base64.b64decode(PRIVATE_KEY_B64), password=None)
 if not isinstance(PRIVATE_KEY, rsa.RSAPrivateKey):
     raise RuntimeError("Kalshi key is not an RSA private key")
+PUBLIC_DER = PRIVATE_KEY.public_key().public_bytes(
+    serialization.Encoding.DER,
+    serialization.PublicFormat.SubjectPublicKeyInfo,
+)
+KEY_FINGERPRINT = hashlib.sha256(PUBLIC_DER).hexdigest()[:24]
 
 stop_event = asyncio.Event()
+
+
+class SequenceGap(RuntimeError):
+    pass
+
+
+class MissingSnapshot(RuntimeError):
+    pass
+
+
+class MarketUniverseChanged(RuntimeError):
+    pass
 
 
 def utc_iso_from_ns(epoch_ns: int) -> str:
@@ -47,6 +66,11 @@ def utc_iso_from_ns(epoch_ns: int) -> str:
 
 def payload_hash(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def next_chain_hash(prev: str | None, connection_id: str, received_epoch_ns: int, raw_sha: str) -> str:
+    material = f"{prev or ''}|{connection_id}|{received_epoch_ns}|{raw_sha}".encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 def auth_headers() -> dict[str, str]:
@@ -66,21 +90,27 @@ def auth_headers() -> dict[str, str]:
 
 
 def http_json(url: str) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.1"})
     with urllib.request.urlopen(req, timeout=10) as response:
         return json.loads(response.read())
 
 
 async def discover_markets() -> set[str]:
-    tickers: set[str] = set()
-    for series in SERIES:
+    async def one(series: str) -> set[str]:
         params = urllib.parse.urlencode({"series_ticker": series, "status": "open", "limit": 1000})
         payload = await asyncio.to_thread(http_json, f"{REST_BASE}/markets?{params}")
-        for market in payload.get("markets", []):
-            ticker = market.get("ticker")
-            if ticker:
-                tickers.add(str(ticker))
+        return {str(m["ticker"]) for m in payload.get("markets", []) if m.get("ticker")}
+
+    groups = await asyncio.gather(*(one(series) for series in SERIES))
+    tickers: set[str] = set()
+    for group in groups:
+        tickers.update(group)
     return tickers
+
+
+async def discover_after_delay() -> set[str]:
+    await asyncio.sleep(DISCOVERY_SECONDS)
+    return await discover_markets()
 
 
 @dataclass
@@ -97,6 +127,11 @@ class JournalRow:
     raw_text: str
     payload: dict[str, Any]
     payload_sha256: str
+    connection_id: str | None = None
+    prev_chain_hash: str | None = None
+    chain_hash: str | None = None
+    price_mode: str | None = None
+    source_message_type: str | None = None
 
 
 @dataclass
@@ -108,26 +143,42 @@ class AuditRow:
     details: dict[str, Any]
 
 
+@dataclass
+class ConnectionJournalState:
+    connection_id: str
+    prev_chain_hash: str | None = None
+
+
 async def insert_session(conn: psycopg.AsyncConnection[Any]) -> None:
+    config = {
+        "series": SERIES,
+        "ws_url": WS_URL,
+        "rest_base": REST_BASE,
+        "use_yes_price": USE_YES_PRICE,
+        "price_mode": PRICE_MODE,
+        "collector": "python-websockets-direct",
+        "key_fingerprint": KEY_FINGERPRINT,
+        "channels": ["orderbook_delta", "trade"],
+        "market_discovery_seconds": DISCOVERY_SECONDS,
+        "rest_crosscheck_seconds": REST_CROSSCHECK_SECONDS,
+    }
     await conn.execute(
         """
         INSERT INTO paper_sessions(id, mode, model_version, status, config)
         VALUES (%s, 'paper_live', %s, 'running', %s::jsonb)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET
+          model_version=EXCLUDED.model_version,
+          status='running',
+          config=paper_sessions.config || EXCLUDED.config
         """,
-        (SESSION_ID, MODEL_VERSION, json.dumps({
-            "series": SERIES,
-            "ws_url": WS_URL,
-            "rest_base": REST_BASE,
-            "use_yes_price": False,
-            "collector": "python-websockets-direct",
-        })),
+        (SESSION_ID, MODEL_VERSION, json.dumps(config, separators=(",", ":"))),
     )
     await conn.commit()
 
 
 async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
     conn = await psycopg.AsyncConnection.connect(DATABASE_URL, autocommit=False)
+    writer_failed = False
     try:
         await insert_session(conn)
         while not (stop_event.is_set() and queue.empty()):
@@ -155,8 +206,12 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
                                 INSERT INTO market_data_journal(
                                   session_id, channel, sid, seq, market_ticker, exchange_ts_ms,
                                   received_at, received_epoch_ms, received_epoch_ns, received_monotonic_ns,
-                                  raw_text, payload, payload_sha256
-                                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                                  raw_text, payload, payload_sha256,
+                                  connection_id, prev_chain_hash, chain_hash, price_mode, source_message_type
+                                ) VALUES (
+                                  %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,
+                                  %s::uuid,%s,%s,%s,%s
+                                )
                                 ON CONFLICT DO NOTHING
                                 """,
                                 (
@@ -164,6 +219,8 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
                                     item.exchange_ts_ms, item.received_at, item.received_epoch_ms,
                                     str(item.received_epoch_ns), str(item.received_monotonic_ns),
                                     item.raw_text, json.dumps(item.payload, separators=(",", ":")), item.payload_sha256,
+                                    item.connection_id, item.prev_chain_hash, item.chain_hash,
+                                    item.price_mode, item.source_message_type,
                                 ),
                             )
                         else:
@@ -173,14 +230,17 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
                                   session_id, severity, component, finding_code, market_ticker, details
                                 ) VALUES (%s,%s,%s,%s,%s,%s::jsonb)
                                 """,
-                                (SESSION_ID, item.severity, item.component, item.finding_code,
-                                 item.market_ticker, json.dumps(item.details, separators=(",", ":"))),
+                                (
+                                    SESSION_ID, item.severity, item.component, item.finding_code,
+                                    item.market_ticker, json.dumps(item.details, separators=(",", ":")),
+                                ),
                             )
                 await conn.commit()
             except Exception:
+                writer_failed = True
                 await conn.rollback()
-                # The event journal is the evidence base. If persistence fails,
-                # fail the collector rather than silently dropping market data.
+                # Evidence persistence is a hard dependency. Never keep collecting
+                # data that cannot be durably journaled.
                 stop_event.set()
                 raise
             finally:
@@ -190,7 +250,7 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
         try:
             await conn.execute(
                 "UPDATE paper_sessions SET stopped_at=now(), status=%s WHERE id=%s",
-                ("stopped" if stop_event.is_set() else "failed", SESSION_ID),
+                ("failed" if writer_failed else "stopped", SESSION_ID),
             )
             await conn.commit()
         except Exception:
@@ -198,18 +258,25 @@ async def db_writer(queue: asyncio.Queue[JournalRow | AuditRow]) -> None:
         await conn.close()
 
 
-async def journal_ws(queue: asyncio.Queue[JournalRow | AuditRow], raw_text: str) -> dict[str, Any]:
-    # Timestamp immediately after the WebSocket library yields the complete frame,
-    # before JSON parsing or DB work. Monotonic time is preserved separately.
+async def journal_ws(
+    queue: asyncio.Queue[JournalRow | AuditRow],
+    raw_text: str,
+    state: ConnectionJournalState,
+) -> dict[str, Any]:
+    # Timestamp immediately after the WebSocket library yields the complete
+    # message, before JSON parsing, normalization, strategy logic, or DB work.
     wall_ns = time.time_ns()
     mono_ns = time.monotonic_ns()
-    raw_bytes = raw_text.encode()
+    raw_bytes = raw_text.encode("utf-8")
+    raw_sha = payload_hash(raw_bytes)
+    chain_hash = next_chain_hash(state.prev_chain_hash, state.connection_id, wall_ns, raw_sha)
     data = json.loads(raw_text)
     msg = data.get("msg") if isinstance(data.get("msg"), dict) else {}
     exchange_ts = msg.get("ts_ms")
     ticker = msg.get("market_ticker")
+    message_type = str(data.get("type", "unknown"))
     row = JournalRow(
-        channel=str(data.get("type", "unknown")),
+        channel=message_type,
         sid=int(data["sid"]) if data.get("sid") is not None else None,
         seq=int(data["seq"]) if data.get("seq") is not None else None,
         market_ticker=str(ticker) if ticker is not None else None,
@@ -220,9 +287,17 @@ async def journal_ws(queue: asyncio.Queue[JournalRow | AuditRow], raw_text: str)
         received_monotonic_ns=mono_ns,
         raw_text=raw_text,
         payload=data,
-        payload_sha256=payload_hash(raw_bytes),
+        payload_sha256=raw_sha,
+        connection_id=state.connection_id,
+        prev_chain_hash=state.prev_chain_hash,
+        chain_hash=chain_hash,
+        price_mode=PRICE_MODE,
+        source_message_type=message_type,
     )
+    # Backpressure is deliberate: if persistence falls behind, stop advancing
+    # the evidence stream rather than dropping raw messages.
     await queue.put(row)
+    state.prev_chain_hash = chain_hash
     return data
 
 
@@ -245,17 +320,25 @@ async def journal_rest_orderbook(queue: asyncio.Queue[JournalRow | AuditRow], ti
         received_epoch_ns=after_ns,
         received_monotonic_ns=after_mono,
         raw_text=raw_text,
-        payload={"request_started_epoch_ns": str(before_ns), "request_rtt_ns": str(after_mono - before_mono), "response": payload},
-        payload_sha256=payload_hash(raw_text.encode()),
+        payload={
+            "request_started_epoch_ns": str(before_ns),
+            "request_rtt_ns": str(after_mono - before_mono),
+            "response": payload,
+        },
+        payload_sha256=payload_hash(raw_text.encode("utf-8")),
+        price_mode="native_outcome",
+        source_message_type="rest_orderbook_crosscheck",
     ))
 
 
-async def rest_crosscheck_loop(queue: asyncio.Queue[JournalRow | AuditRow], active_ref: dict[str, set[str]]) -> None:
+async def rest_crosscheck_loop(
+    queue: asyncio.Queue[JournalRow | AuditRow],
+    active_ref: dict[str, set[str]],
+) -> None:
     while not stop_event.is_set():
         start = time.monotonic()
         markets = sorted(active_ref["markets"])
         if markets:
-            # Bound concurrency to avoid self-induced burst latency and rate-limit noise.
             sem = asyncio.Semaphore(5)
 
             async def one(ticker: str) -> None:
@@ -263,7 +346,10 @@ async def rest_crosscheck_loop(queue: asyncio.Queue[JournalRow | AuditRow], acti
                     try:
                         await journal_rest_orderbook(queue, ticker)
                     except Exception as exc:
-                        await queue.put(AuditRow("warning", "kalshi_rest", "REST_ORDERBOOK_CROSSCHECK_FAILED", ticker, {"error": repr(exc)}))
+                        await queue.put(AuditRow(
+                            "warning", "kalshi_rest", "REST_ORDERBOOK_CROSSCHECK_FAILED", ticker,
+                            {"error": repr(exc)},
+                        ))
 
             await asyncio.gather(*(one(t) for t in markets))
         sleep_for = max(0.1, REST_CROSSCHECK_SECONDS - (time.monotonic() - start))
@@ -273,7 +359,10 @@ async def rest_crosscheck_loop(queue: asyncio.Queue[JournalRow | AuditRow], acti
             pass
 
 
-async def run_ws(queue: asyncio.Queue[JournalRow | AuditRow], active_ref: dict[str, set[str]]) -> None:
+async def run_ws(
+    queue: asyncio.Queue[JournalRow | AuditRow],
+    active_ref: dict[str, set[str]],
+) -> None:
     reconnect_backoff = 0.5
     while not stop_event.is_set():
         markets = await discover_markets()
@@ -286,7 +375,12 @@ async def run_ws(queue: asyncio.Queue[JournalRow | AuditRow], active_ref: dict[s
                 pass
             continue
 
+        connection_id = str(uuid.uuid4())
+        journal_state = ConnectionJournalState(connection_id=connection_id)
         headers = auth_headers()
+        recv_task: asyncio.Task[Any] | None = None
+        discovery_task: asyncio.Task[set[str]] | None = None
+
         try:
             async with websockets.connect(
                 WS_URL,
@@ -300,100 +394,158 @@ async def run_ws(queue: asyncio.Queue[JournalRow | AuditRow], active_ref: dict[s
                 max_size=4 * 1024 * 1024,
             ) as ws:
                 reconnect_backoff = 0.5
-                subscribe = {
+                await queue.put(AuditRow(
+                    "info", "kalshi_ws", "WS_CONNECTED", None,
+                    {"connection_id": connection_id, "market_count": len(markets), "price_mode": PRICE_MODE},
+                ))
+
+                # Separate subscriptions keep channel SIDs unambiguous. The
+                # orderbook explicitly opts into unified YES-leg pricing so a
+                # future Kalshi default flip cannot silently change semantics.
+                await ws.send(json.dumps({
                     "id": 1,
                     "cmd": "subscribe",
                     "params": {
                         "channels": ["orderbook_delta"],
                         "market_tickers": sorted(markets),
-                        # Explicit legacy own-leg NO pricing. Do not depend on
-                        # Kalshi's announced future default flip.
-                        "use_yes_price": False,
+                        "use_yes_price": USE_YES_PRICE,
                     },
-                }
-                await ws.send(json.dumps(subscribe, separators=(",", ":")))
+                }, separators=(",", ":")))
+                await ws.send(json.dumps({
+                    "id": 2,
+                    "cmd": "subscribe",
+                    "params": {
+                        "channels": ["trade"],
+                        "market_tickers": sorted(markets),
+                    },
+                }, separators=(",", ":")))
 
-                orderbook_sid: int | None = None
                 last_seq: dict[int, int] = {}
-                current_markets = set(markets)
-                next_discovery = time.monotonic() + DISCOVERY_SECONDS
+                snapshot_markets: set[str] = set()
+                recv_task = asyncio.create_task(ws.recv(), name=f"ws-recv-{connection_id}")
+                discovery_task = asyncio.create_task(discover_after_delay(), name=f"market-discovery-{connection_id}")
 
                 while not stop_event.is_set():
-                    timeout = max(0.05, next_discovery - time.monotonic())
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-                    except asyncio.TimeoutError:
-                        raw = None
+                    done, _ = await asyncio.wait(
+                        {recv_task, discovery_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
 
-                    if raw is not None:
+                    if recv_task in done:
+                        raw = recv_task.result()
+                        # Schedule the next socket read before doing JSON/queue work.
+                        recv_task = asyncio.create_task(ws.recv(), name=f"ws-recv-{connection_id}")
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8")
-                        data = await journal_ws(queue, raw)
+                        data = await journal_ws(queue, raw, journal_state)
                         msg_type = data.get("type")
-                        if msg_type == "error":
-                            await queue.put(AuditRow("error", "kalshi_ws", "WS_ERROR_MESSAGE", None, {"message": data}))
-                        elif msg_type == "subscribed" and data.get("msg", {}).get("channel") == "orderbook_delta":
-                            orderbook_sid = int(data["msg"]["sid"])
-                        elif msg_type in ("orderbook_snapshot", "orderbook_delta"):
-                            sid = int(data.get("sid")) if data.get("sid") is not None else None
-                            seq = int(data.get("seq")) if data.get("seq") is not None else None
-                            if sid is not None and seq is not None:
-                                prev = last_seq.get(sid)
-                                if prev is not None and seq != prev + 1:
-                                    ticker = data.get("msg", {}).get("market_ticker")
-                                    await queue.put(AuditRow(
-                                        "fatal", "kalshi_ws", "ORDERBOOK_SEQUENCE_GAP", ticker,
-                                        {"sid": sid, "expected": prev + 1, "received": seq,
-                                         "missing_from": prev + 1, "missing_to": seq - 1},
-                                    ))
-                                    # The missing message cannot be reconstructed.
-                                    # Re-snapshot every tracked market so subsequent
-                                    # paper signals can start from a new known state.
-                                    if orderbook_sid is not None and current_markets:
-                                        await ws.send(json.dumps({
-                                            "id": int(time.time_ns() % 2_000_000_000),
-                                            "cmd": "update_subscription",
-                                            "params": {
-                                                "sids": [orderbook_sid],
-                                                "market_tickers": sorted(current_markets),
-                                                "action": "get_snapshot",
-                                            },
-                                        }, separators=(",", ":")))
-                                last_seq[sid] = seq
+                        msg = data.get("msg") if isinstance(data.get("msg"), dict) else {}
 
-                    if time.monotonic() >= next_discovery:
-                        discovered = await discover_markets()
+                        if msg_type == "error":
+                            await queue.put(AuditRow(
+                                "error", "kalshi_ws", "WS_ERROR_MESSAGE", None,
+                                {"connection_id": connection_id, "message": data},
+                            ))
+                        elif msg_type in ("orderbook_snapshot", "orderbook_delta"):
+                            sid = int(data["sid"]) if data.get("sid") is not None else None
+                            seq = int(data["seq"]) if data.get("seq") is not None else None
+                            ticker = str(msg.get("market_ticker") or "")
+                            if sid is None or seq is None:
+                                await queue.put(AuditRow(
+                                    "fatal", "kalshi_ws", "ORDERBOOK_MISSING_SEQUENCE", ticker or None,
+                                    {"connection_id": connection_id, "sid": sid, "seq": seq},
+                                ))
+                                raise SequenceGap("orderbook message missing sid/seq")
+
+                            prev = last_seq.get(sid)
+                            if prev is not None and seq != prev + 1:
+                                await queue.put(AuditRow(
+                                    "fatal", "kalshi_ws", "ORDERBOOK_SEQUENCE_GAP", ticker or None,
+                                    {
+                                        "connection_id": connection_id,
+                                        "sid": sid,
+                                        "expected": prev + 1,
+                                        "received": seq,
+                                        "missing_from": prev + 1,
+                                        "missing_to": seq - 1,
+                                    },
+                                ))
+                                # Missing deltas are unrecoverable evidence. End
+                                # this continuity generation and reconnect for a
+                                # fresh full snapshot before any further use.
+                                raise SequenceGap(f"sid={sid} expected={prev + 1} got={seq}")
+                            last_seq[sid] = seq
+
+                            if msg_type == "orderbook_snapshot":
+                                if ticker:
+                                    snapshot_markets.add(ticker)
+                            elif ticker not in snapshot_markets:
+                                await queue.put(AuditRow(
+                                    "fatal", "kalshi_ws", "DELTA_BEFORE_SNAPSHOT", ticker or None,
+                                    {"connection_id": connection_id, "sid": sid, "seq": seq},
+                                ))
+                                raise MissingSnapshot(f"delta before snapshot for {ticker}")
+
+                    if discovery_task in done:
+                        discovered = discovery_task.result()
                         active_ref["markets"] = set(discovered)
-                        if orderbook_sid is not None:
-                            add = sorted(discovered - current_markets)
-                            delete = sorted(current_markets - discovered)
-                            if add:
-                                await ws.send(json.dumps({
-                                    "id": int(time.time_ns() % 2_000_000_000),
-                                    "cmd": "update_subscription",
-                                    "params": {"sids": [orderbook_sid], "market_tickers": add, "action": "add_markets"},
-                                }, separators=(",", ":")))
-                            if delete:
-                                await ws.send(json.dumps({
-                                    "id": int(time.time_ns() % 2_000_000_000),
-                                    "cmd": "update_subscription",
-                                    "params": {"sids": [orderbook_sid], "market_tickers": delete, "action": "delete_markets"},
-                                }, separators=(",", ":")))
-                        current_markets = set(discovered)
-                        next_discovery = time.monotonic() + DISCOVERY_SECONDS
+                        if discovered != markets:
+                            await queue.put(AuditRow(
+                                "info", "kalshi_ws", "MARKET_UNIVERSE_CHANGED", None,
+                                {
+                                    "connection_id": connection_id,
+                                    "added": sorted(discovered - markets),
+                                    "removed": sorted(markets - discovered),
+                                },
+                            ))
+                            # A reconnect gives both orderbook and trade channels a
+                            # clean, common universe and fresh snapshot boundary.
+                            raise MarketUniverseChanged("open market set changed")
+                        discovery_task = asyncio.create_task(
+                            discover_after_delay(),
+                            name=f"market-discovery-{connection_id}",
+                        )
+
         except asyncio.CancelledError:
             raise
+        except MarketUniverseChanged:
+            reconnect_backoff = 0.1
+        except (SequenceGap, MissingSnapshot) as exc:
+            await queue.put(AuditRow(
+                "fatal", "kalshi_ws", "WS_CONTINUITY_INVALIDATED", None,
+                {"connection_id": connection_id, "error": repr(exc)},
+            ))
+            reconnect_backoff = 0.25
         except Exception as exc:
-            await queue.put(AuditRow("error", "kalshi_ws", "WS_CONNECTION_RESET", None, {"error": repr(exc), "backoff_seconds": reconnect_backoff}))
+            await queue.put(AuditRow(
+                "error", "kalshi_ws", "WS_CONNECTION_RESET", None,
+                {"connection_id": connection_id, "error": repr(exc), "backoff_seconds": reconnect_backoff},
+            ))
+        finally:
+            for task in (recv_task, discovery_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (recv_task, discovery_task) if task is not None),
+                return_exceptions=True,
+            )
+
+        if not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=reconnect_backoff)
             except asyncio.TimeoutError:
                 pass
-            reconnect_backoff = min(15.0, reconnect_backoff * 2)
+            reconnect_backoff = min(15.0, max(0.25, reconnect_backoff * 2))
 
 
 async def main() -> None:
-    print(json.dumps({"event": "paper_collector_start", "session_id": SESSION_ID, "series": SERIES}))
+    print(json.dumps({
+        "event": "paper_collector_start",
+        "session_id": SESSION_ID,
+        "series": SERIES,
+        "price_mode": PRICE_MODE,
+        "key_fingerprint": KEY_FINGERPRINT,
+    }))
     queue: asyncio.Queue[JournalRow | AuditRow] = asyncio.Queue(maxsize=DB_QUEUE_MAX)
     active_ref: dict[str, set[str]] = {"markets": set()}
 
@@ -409,10 +561,12 @@ async def main() -> None:
     rest_task = asyncio.create_task(rest_crosscheck_loop(queue, active_ref), name="rest-crosscheck")
 
     try:
-        # A writer failure is fatal because unjournaled market data invalidates
-        # the evidence stream. A collector task failure also propagates.
         done, _ = await asyncio.wait({writer, ws_task, rest_task}, return_when=asyncio.FIRST_EXCEPTION)
-        failures = [(task.get_name(), task.exception()) for task in done if not task.cancelled() and task.exception()]
+        failures = [
+            (task.get_name(), task.exception())
+            for task in done
+            if not task.cancelled() and task.exception()
+        ]
         if failures:
             stop_event.set()
             for name, exc in failures:
@@ -420,7 +574,6 @@ async def main() -> None:
             raise RuntimeError("; ".join(f"{name}: {exc!r}" for name, exc in failures))
     finally:
         stop_event.set()
-        # Stop producers first so the writer can drain every item already timestamped.
         for task in (ws_task, rest_task):
             if not task.done():
                 task.cancel()
