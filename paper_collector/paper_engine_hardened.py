@@ -4,7 +4,8 @@ from __future__ import annotations
 
 The original implementation is retained for replay compatibility.  Live paper
 execution imports this module instead so the benchmark path gets stricter
-calendar and same-day-high semantics without rewriting the proven fill/fee code.
+calendar, same-day-high, and drawdown semantics without rewriting the proven
+fill/fee code.
 """
 
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 import psycopg
 
 import paper_engine as base
+import risk_controls
 from market_calendar import confirmed_same_day_high, event_matches_observation
 from stations import STATIONS
 
@@ -22,6 +24,28 @@ load_modes = base.load_modes
 weather_row = base.weather_row
 audit_error = base.audit_error
 SESSION_ID = base.SESSION_ID
+
+_ORIGINAL_MODE_BUDGET = base.mode_budget
+
+
+def _risk_adjusted_mode_budget(
+    conn: psycopg.Connection[Any],
+    mode: dict[str, Any],
+    candidate: base.Candidate,
+    global_cfg: dict[str, Any],
+):
+    raw = _ORIGINAL_MODE_BUDGET(conn, mode, candidate, global_cfg)
+    return risk_controls.apply_budget_multiplier(
+        conn,
+        int(mode["portfolio_id"]),
+        raw,
+        global_cfg,
+    )
+
+
+# base.execute_candidates resolves mode_budget from its module globals when it
+# runs, so this applies the drawdown gate without forking the fill/fee engine.
+base.mode_budget = _risk_adjusted_mode_budget
 
 
 def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> int:
