@@ -10,6 +10,13 @@ export type KalshiBookSnapshot = {
   noBids: PriceLevel[];
 };
 
+const PRICE_SCALE = 1_000_000;
+
+/** Kalshi dollar prices are fixed-point to at most 6 decimals on current APIs. */
+export function quantizePrice(value: number) {
+  return Math.round(value * PRICE_SCALE) / PRICE_SCALE;
+}
+
 function normalize(levels: Map<number, number>): PriceLevel[] {
   return [...levels.entries()]
     .filter(([, qty]) => qty > 0)
@@ -56,17 +63,19 @@ export class KalshiOrderBook {
     if (this.lastSeq && input.seq !== this.lastSeq + 1) {
       throw new Error(`ORDERBOOK_SEQUENCE_GAP ${this.marketTicker}: expected ${this.lastSeq + 1}, got ${input.seq}`);
     }
+    const price = quantizePrice(input.price);
     const map = input.side === "yes" ? this.yes : this.no;
-    const next = (map.get(input.price) ?? 0) + input.delta;
-    if (next < -1e-9) throw new Error(`ORDERBOOK_NEGATIVE_QTY ${this.marketTicker} ${input.side} ${input.price}`);
-    this.setLevel(input.side, input.price, Math.max(0, next));
+    const next = (map.get(price) ?? 0) + input.delta;
+    if (next < -1e-9) throw new Error(`ORDERBOOK_NEGATIVE_QTY ${this.marketTicker} ${input.side} ${price}`);
+    this.setLevel(input.side, price, Math.max(0, next));
     this.lastSeq = input.seq;
     this.exchangeTsMs = input.exchangeTsMs ?? this.exchangeTsMs;
     this.receivedEpochMs = input.receivedEpochMs;
   }
 
-  private setLevel(side: BookSide, price: number, qty: number) {
-    if (!Number.isFinite(price) || price < 0 || price > 1) throw new Error(`BAD_PRICE ${price}`);
+  private setLevel(side: BookSide, rawPrice: number, qty: number) {
+    const price = quantizePrice(rawPrice);
+    if (!Number.isFinite(price) || price < 0 || price > 1) throw new Error(`BAD_PRICE ${rawPrice}`);
     if (!Number.isFinite(qty) || qty < 0) throw new Error(`BAD_QTY ${qty}`);
     const map = side === "yes" ? this.yes : this.no;
     if (qty === 0) map.delete(price);
@@ -91,13 +100,13 @@ export class KalshiOrderBook {
   // and a YES bid at x is a NO ask at 1-x. Quantity is identical.
   yesAsks(): PriceLevel[] {
     return normalize(this.no)
-      .map((l) => ({ price: 1 - l.price, qty: l.qty }))
+      .map((l) => ({ price: quantizePrice(1 - l.price), qty: l.qty }))
       .sort((a, b) => a.price - b.price);
   }
 
   noAsks(): PriceLevel[] {
     return normalize(this.yes)
-      .map((l) => ({ price: 1 - l.price, qty: l.qty }))
+      .map((l) => ({ price: quantizePrice(1 - l.price), qty: l.qty }))
       .sort((a, b) => a.price - b.price);
   }
 }
@@ -116,8 +125,9 @@ export function consumeAsTaker(book: KalshiOrderBook, outcome: BookSide, qty: nu
   let remaining = qty;
   let cost = 0;
   const levels: Array<{ price: number; qty: number }> = [];
+  const limit = quantizePrice(maxPrice);
   for (const level of asks) {
-    if (remaining <= 1e-9 || level.price > maxPrice) break;
+    if (remaining <= 1e-9 || level.price > limit) break;
     const take = Math.min(level.qty, remaining);
     if (take <= 0) continue;
     levels.push({ price: level.price, qty: take });
@@ -128,8 +138,8 @@ export function consumeAsTaker(book: KalshiOrderBook, outcome: BookSide, qty: nu
   return {
     requestedQty: qty,
     filledQty,
-    avgPrice: filledQty > 0 ? cost / filledQty : null,
-    grossCost: cost,
+    avgPrice: filledQty > 0 ? quantizePrice(cost / filledQty) : null,
+    grossCost: quantizePrice(cost),
     worstPrice: levels.length ? levels[levels.length - 1].price : null,
     levels,
   };
