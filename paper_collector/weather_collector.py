@@ -15,9 +15,9 @@ import psycopg
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_ID = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
-MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1")
+MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1.1")
 STATIONS = [x.strip() for x in os.getenv("WEATHER_STATIONS", "KNYC,KPHL,KLAX").split(",") if x.strip()]
-POLL_SECONDS = max(60.0, float(os.getenv("AWC_POLL_SECONDS", "60")))
+POLL_SECONDS = max(5.0, float(os.getenv("AWC_POLL_SECONDS", "10")))
 AWC_URL = os.getenv("AWC_METAR_URL", "https://aviationweather.gov/api/data/metar")
 STOP = False
 
@@ -36,7 +36,7 @@ def iso_from_epoch_seconds(seconds: int | float) -> str:
 
 
 def http_json(url: str) -> list[dict[str, Any]]:
-    req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.1"})
     with urllib.request.urlopen(req, timeout=15) as response:
         if response.status == 204:
             return []
@@ -44,13 +44,17 @@ def http_json(url: str) -> list[dict[str, Any]]:
 
 
 def ensure_session(conn: psycopg.Connection[Any]) -> None:
+    config = {"weather_stations": STATIONS, "awc_poll_seconds": POLL_SECONDS, "weather_collector": "awc-live-v1.1"}
     conn.execute(
         """
         INSERT INTO paper_sessions(id, mode, model_version, status, config)
         VALUES (%s,'paper_live',%s,'running',%s::jsonb)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET
+          model_version=EXCLUDED.model_version,
+          status='running',
+          config=paper_sessions.config || EXCLUDED.config
         """,
-        (SESSION_ID, MODEL_VERSION, json.dumps({"weather_stations": STATIONS, "awc_poll_seconds": POLL_SECONDS})),
+        (SESSION_ID, MODEL_VERSION, json.dumps(config, separators=(",", ":"))),
     )
     conn.commit()
 
@@ -58,11 +62,12 @@ def ensure_session(conn: psycopg.Connection[Any]) -> None:
 def collect_once(conn: psycopg.Connection[Any]) -> int:
     params = urllib.parse.urlencode({"ids": ",".join(STATIONS), "format": "json", "hours": 2})
     url = f"{AWC_URL}?{params}"
-    first_seen_ns = time.time_ns()
-    first_seen_mono_ns = time.monotonic_ns()
+    request_started_ns = time.time_ns()
+    request_started_mono_ns = time.monotonic_ns()
     reports = http_json(url)
-    first_seen_ns = time.time_ns()
-    first_seen_mono_ns = time.monotonic_ns()
+    response_completed_ns = time.time_ns()
+    response_completed_mono_ns = time.monotonic_ns()
+    request_rtt_ns = response_completed_mono_ns - request_started_mono_ns
     written = 0
 
     for report in reports:
@@ -73,9 +78,17 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
             continue
         canonical = json.dumps(report, separators=(",", ":"), sort_keys=True)
         payload_sha = hashlib.sha256(canonical.encode()).hexdigest()
-        receipt = report.get("receiptTime")
+        source_receipt = report.get("receiptTime")
         temp_c = float(report["temp"]) if report.get("temp") is not None else None
         max_c = float(report["maxT"]) if report.get("maxT") is not None else None
+        stored_payload = {
+            "report": report,
+            "capture": {
+                "request_started_epoch_ns": str(request_started_ns),
+                "response_completed_epoch_ns": str(response_completed_ns),
+                "request_rtt_ns": str(request_rtt_ns),
+            },
+        }
 
         row = conn.execute(
             """
@@ -96,15 +109,15 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
                 station,
                 str(report.get("metarType") or "METAR"),
                 iso_from_epoch_seconds(obs_time),
-                str(receipt) if receipt else None,
-                datetime.fromtimestamp(first_seen_ns / 1_000_000_000, tz=timezone.utc).isoformat(),
-                first_seen_ns // 1_000_000,
-                str(first_seen_ns),
-                str(first_seen_mono_ns),
+                str(source_receipt) if source_receipt else None,
+                utc_iso_from_ns(response_completed_ns),
+                response_completed_ns // 1_000_000,
+                str(response_completed_ns),
+                str(response_completed_mono_ns),
                 c_to_f(temp_c),
                 c_to_f(max_c),
                 str(raw),
-                canonical,
+                json.dumps(stored_payload, separators=(",", ":")),
                 payload_sha,
             ),
         ).fetchone()
@@ -114,10 +127,19 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
     return written
 
 
+def utc_iso_from_ns(epoch_ns: int) -> str:
+    return datetime.fromtimestamp(epoch_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print(json.dumps({"event": "weather_collector_start", "session_id": SESSION_ID, "stations": STATIONS}))
+    print(json.dumps({
+        "event": "weather_collector_start",
+        "session_id": SESSION_ID,
+        "stations": STATIONS,
+        "poll_seconds": POLL_SECONDS,
+    }))
     with psycopg.connect(DATABASE_URL) as conn:
         ensure_session(conn)
         while not STOP:
