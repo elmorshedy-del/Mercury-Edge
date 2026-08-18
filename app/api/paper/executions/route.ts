@@ -41,9 +41,25 @@ type JournalRow = {
   price_mode: string | null;
 };
 
+type TradeJournalRow = {
+  market_ticker: string;
+  received_at: Date;
+  exchange_ts_ms: string | null;
+  raw_text: string;
+};
+
 type LiveMark = {
   yesBid: number | null;
   noBid: number | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  receivedAt: string;
+  exchangeAt: string | null;
+};
+
+type LastTrade = {
+  yesPrice: number | null;
+  noPrice: number | null;
   receivedAt: string;
   exchangeAt: string | null;
 };
@@ -51,6 +67,8 @@ type LiveMark = {
 function nativePrice(side: "yes" | "no", raw: unknown, priceMode: string | null) {
   const price = Number(raw);
   if (!Number.isFinite(price)) return null;
+  // With use_yes_price=true, NO-side orderbook levels are transmitted on the
+  // YES-leg scale. Convert them back to native NO bids before deriving asks.
   return side === "no" && priceMode === "unified_yes" ? 1 - price : price;
 }
 
@@ -122,14 +140,42 @@ function reconstructMarks(rows: JournalRow[]) {
   for (const [ticker, book] of books) {
     const yesPrices = [...book.yes.keys()];
     const noPrices = [...book.no.keys()];
+    const yesBid = yesPrices.length ? Math.max(...yesPrices) : null;
+    const noBid = noPrices.length ? Math.max(...noPrices) : null;
     marks.set(ticker, {
-      yesBid: yesPrices.length ? Math.max(...yesPrices) : null,
-      noBid: noPrices.length ? Math.max(...noPrices) : null,
+      yesBid,
+      noBid,
+      yesAsk: noBid === null ? null : 1 - noBid,
+      noAsk: yesBid === null ? null : 1 - yesBid,
       receivedAt: book.receivedAt,
       exchangeAt: book.exchangeAt,
     });
   }
   return marks;
+}
+
+function parseLastTrades(rows: TradeJournalRow[]) {
+  const trades = new Map<string, LastTrade>();
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.raw_text) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const msg = payload.msg && typeof payload.msg === "object"
+      ? payload.msg as Record<string, unknown>
+      : {};
+    const yesPrice = Number(msg.yes_price_dollars);
+    const noPrice = Number(msg.no_price_dollars);
+    trades.set(row.market_ticker, {
+      yesPrice: Number.isFinite(yesPrice) ? yesPrice : null,
+      noPrice: Number.isFinite(noPrice) ? noPrice : null,
+      receivedAt: row.received_at.toISOString(),
+      exchangeAt: row.exchange_ts_ms === null ? null : new Date(Number(row.exchange_ts_ms)).toISOString(),
+    });
+  }
+  return trades;
 }
 
 export async function GET() {
@@ -191,30 +237,44 @@ export async function GET() {
 
     const tickers = [...new Set(result.rows.map((row) => row.market_ticker))];
     let liveMarks = new Map<string, LiveMark>();
+    let lastTrades = new Map<string, LastTrade>();
 
     if (tickers.length) {
-      const journal = await pool.query<JournalRow>(
-        `WITH latest_snapshot AS (
-           SELECT DISTINCT ON (market_ticker)
-                  market_ticker,id,connection_id
+      const [journal, trades] = await Promise.all([
+        pool.query<JournalRow>(
+          `WITH latest_snapshot AS (
+             SELECT DISTINCT ON (market_ticker)
+                    market_ticker,id,connection_id
+               FROM market_data_journal
+              WHERE session_id=$1
+                AND market_ticker=ANY($2::text[])
+                AND channel='orderbook_snapshot'
+              ORDER BY market_ticker,received_epoch_ms DESC,id DESC
+           )
+           SELECT j.market_ticker,j.id::text,j.channel,j.received_at,j.exchange_ts_ms::text,j.raw_text,j.price_mode
+             FROM latest_snapshot s
+             JOIN market_data_journal j
+               ON j.session_id=$1
+              AND j.market_ticker=s.market_ticker
+              AND j.connection_id=s.connection_id
+              AND j.id>=s.id
+            WHERE j.channel IN ('orderbook_snapshot','orderbook_delta')
+            ORDER BY j.market_ticker,j.id ASC`,
+          [sessionId, tickers],
+        ),
+        pool.query<TradeJournalRow>(
+          `SELECT DISTINCT ON (market_ticker)
+                  market_ticker,received_at,exchange_ts_ms::text,raw_text
              FROM market_data_journal
             WHERE session_id=$1
               AND market_ticker=ANY($2::text[])
-              AND channel='orderbook_snapshot'
-            ORDER BY market_ticker,received_epoch_ms DESC,id DESC
-         )
-         SELECT j.market_ticker,j.id::text,j.channel,j.received_at,j.exchange_ts_ms::text,j.raw_text,j.price_mode
-           FROM latest_snapshot s
-           JOIN market_data_journal j
-             ON j.session_id=$1
-            AND j.market_ticker=s.market_ticker
-            AND j.connection_id=s.connection_id
-            AND j.id>=s.id
-          WHERE j.channel IN ('orderbook_snapshot','orderbook_delta')
-          ORDER BY j.market_ticker,j.id ASC`,
-        [sessionId, tickers],
-      );
+              AND channel='trade'
+            ORDER BY market_ticker,received_epoch_ms DESC,id DESC`,
+          [sessionId, tickers],
+        ),
+      ]);
       liveMarks = reconstructMarks(journal.rows);
+      lastTrades = parseLastTrades(trades.rows);
     }
 
     return NextResponse.json({
@@ -227,14 +287,23 @@ export async function GET() {
         const grossCost = Number(row.gross_cost);
         const entryFee = Number(row.estimated_fee);
         const mark = liveMarks.get(row.market_ticker) ?? null;
-        const latestPrice = row.outcome_side === "yes" ? mark?.yesBid ?? null : mark?.noBid ?? null;
-        const priceChange = latestPrice === null || entryPrice === null ? null : latestPrice - entryPrice;
+        const tradePrint = lastTrades.get(row.market_ticker) ?? null;
+
+        const liveBid = row.outcome_side === "yes" ? mark?.yesBid ?? null : mark?.noBid ?? null;
+        const liveAsk = row.outcome_side === "yes" ? mark?.yesAsk ?? null : mark?.noAsk ?? null;
+        const lastTradePrice = row.outcome_side === "yes"
+          ? tradePrint?.yesPrice ?? null
+          : tradePrint?.noPrice ?? null;
+
+        // P&L is deliberately marked to the executable bid, not to the ask or
+        // last trade. This is the price the paper position could sell into now.
+        const priceChange = liveBid === null || entryPrice === null ? null : liveBid - entryPrice;
         const priceChangePct = priceChange === null || entryPrice === null || entryPrice <= 0
           ? null
           : priceChange / entryPrice;
-        const markPnl = latestPrice === null
+        const markPnl = liveBid === null
           ? null
-          : latestPrice * filledQty - grossCost - entryFee;
+          : liveBid * filledQty - grossCost - entryFee;
 
         return {
           id: row.id,
@@ -262,13 +331,17 @@ export async function GET() {
           positionQty: row.position_qty === null ? null : Number(row.position_qty),
           positionCostBasis: row.position_cost_basis === null ? null : Number(row.position_cost_basis),
           lastMark: row.last_mark === null ? null : Number(row.last_mark),
-          latestPrice,
+          latestPrice: liveBid,
+          liveBid,
+          liveAsk,
           latestPriceAt: mark?.receivedAt ?? null,
           latestExchangeAt: mark?.exchangeAt ?? null,
+          lastTradePrice,
+          lastTradeAt: tradePrint?.exchangeAt ?? tradePrint?.receivedAt ?? null,
           priceChange,
           priceChangePct,
           markPnl,
-          markMethod: latestPrice === null ? null : "executable_bid",
+          markMethod: liveBid === null ? null : "executable_bid",
         };
       }),
     });
