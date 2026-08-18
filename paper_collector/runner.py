@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,19 +19,32 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from stations import MARKET_SERIES, OMO_DEFAULT_NETWORKS, WEATHER_STATIONS
 
 
+PEM_RE = re.compile(
+    r"-----BEGIN (?P<label>RSA PRIVATE KEY|PRIVATE KEY)-----"
+    r"(?P<body>.*?)"
+    r"-----END (?P=label)-----",
+    re.DOTALL,
+)
+
+
 def _canonical_pem_bytes(value: str) -> bytes | None:
     normalized = value.strip().strip('"').strip("'").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
-    if "-----BEGIN " not in normalized or "PRIVATE KEY-----" not in normalized or "-----END " not in normalized:
+    match = PEM_RE.search(normalized)
+    if not match:
         return None
-    begin = normalized.find("-----BEGIN ")
-    return (normalized[begin:].rstrip() + "\n").encode("utf-8")
+    label = match.group("label")
+    body = "".join(match.group("body").split())
+    if not body:
+        return None
+    wrapped = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN {label}-----\n{wrapped}\n-----END {label}-----\n".encode("utf-8")
 
 
 def normalize_private_key_env(env: dict[str, str]) -> None:
     """Accept common RSA key encodings without logging key material.
 
-    Input may be raw/escaped PEM, base64(Pem), or base64(DER). Children always
-    receive base64 of a canonical unencrypted PKCS8 PEM.
+    Input may be raw/escaped PEM, one-line PEM, base64(PEM), or base64(DER).
+    Children always receive base64 of a canonical unencrypted PKCS8 PEM.
     """
     raw = env.get("KALSHI_PRIVATE_KEY_PEM_B64", "").strip()
     if not raw:
@@ -122,9 +136,6 @@ def main() -> int:
         ("awc", "weather_collector.py", True),
         ("omo", "omo_collector.py", True),
         ("rules", "rule_collector.py", True),
-        # One deterministic engine owns portfolio decisions for every strategy.
-        # It is non-critical so evidence capture survives a strategy bug; the
-        # supervisor restarts it and DB uniqueness guards prevent duplicates.
         ("paper_trader", "unified_engine.py", False),
         ("auditor", "audit_daemon.py", False),
     ]
