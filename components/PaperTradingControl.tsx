@@ -98,9 +98,14 @@ export function PaperTradingControl() {
   }, []);
 
   useEffect(() => {
-    void load().catch((error) => setMessage(error instanceof Error ? error.message : "Unable to load paper controls"));
+    const initial = window.setTimeout(() => {
+      void load().catch((error) => setMessage(error instanceof Error ? error.message : "Unable to load paper controls"));
+    }, 0);
     const timer = window.setInterval(() => void load().catch(() => undefined), 10_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [load]);
 
   const portfolioMap = useMemo(
