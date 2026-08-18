@@ -1,5 +1,22 @@
+import {
+  PRICE_SCALE,
+  QTY_SCALE,
+  complementPriceFp,
+  microsToDollars,
+  notionalMicros,
+  parsePriceFp,
+  parseQtyFp,
+  priceFpToDollars,
+  qtyFpToContracts,
+} from "./fixed";
+
 export type BookSide = "yes" | "no";
-export type PriceLevel = { price: number; qty: number };
+export type PriceLevel = {
+  priceFp: number;
+  qtyFp: number;
+  price: number;
+  qty: number;
+};
 
 export type KalshiBookSnapshot = {
   marketTicker: string;
@@ -10,25 +27,56 @@ export type KalshiBookSnapshot = {
   noBids: PriceLevel[];
 };
 
-const PRICE_SCALE = 1_000_000;
-
-/** Kalshi dollar prices are fixed-point to at most 6 decimals on current APIs. */
-export function quantizePrice(value: number) {
-  return Math.round(value * PRICE_SCALE) / PRICE_SCALE;
+function makeLevel(priceFp: number, qtyFp: number): PriceLevel {
+  return {
+    priceFp,
+    qtyFp,
+    price: priceFpToDollars(priceFp),
+    qty: qtyFpToContracts(qtyFp),
+  };
 }
 
 function normalize(levels: Map<number, number>): PriceLevel[] {
   return [...levels.entries()]
-    .filter(([, qty]) => qty > 0)
-    .map(([price, qty]) => ({ price, qty }))
-    .sort((a, b) => a.price - b.price);
+    .filter(([, qtyFp]) => qtyFp > 0)
+    .map(([priceFp, qtyFp]) => makeLevel(priceFp, qtyFp))
+    .sort((a, b) => a.priceFp - b.priceFp);
+}
+
+/**
+ * Sequence numbers are scoped to a WebSocket subscription stream (sid), not
+ * one market. Validate them outside individual market books so interleaved
+ * updates across tickers cannot create false gap alarms.
+ */
+export class SubscriptionSequenceGuard {
+  private lastBySid = new Map<number, number>();
+
+  observe(sid: number, seq: number) {
+    if (!Number.isSafeInteger(sid) || !Number.isSafeInteger(seq)) {
+      throw new Error(`BAD_WS_SEQUENCE sid=${sid} seq=${seq}`);
+    }
+    const prior = this.lastBySid.get(sid);
+    if (prior !== undefined && seq !== prior + 1) {
+      throw new Error(`ORDERBOOK_SEQUENCE_GAP sid=${sid}: expected ${prior + 1}, got ${seq}`);
+    }
+    this.lastBySid.set(sid, seq);
+  }
+
+  reset(sid?: number) {
+    if (sid === undefined) this.lastBySid.clear();
+    else this.lastBySid.delete(sid);
+  }
+
+  last(sid: number) {
+    return this.lastBySid.get(sid) ?? null;
+  }
 }
 
 export class KalshiOrderBook {
   readonly marketTicker: string;
-  private yes = new Map<number, number>();
-  private no = new Map<number, number>();
-  private lastSeq = 0;
+  private yes = new Map<number, number>(); // native YES-bid price fp -> qty fp
+  private no = new Map<number, number>(); // native NO-bid price fp -> qty fp
+  private lastSourceSeq = 0;
   private exchangeTsMs: number | null = null;
   private receivedEpochMs = 0;
 
@@ -45,9 +93,9 @@ export class KalshiOrderBook {
   }) {
     this.yes.clear();
     this.no.clear();
-    for (const [p, q] of input.yes) this.setLevel("yes", Number(p), Number(q));
-    for (const [p, q] of input.no) this.setLevel("no", Number(p), Number(q));
-    this.lastSeq = input.seq;
+    for (const [p, q] of input.yes) this.setLevelFp("yes", parsePriceFp(p), parseQtyFp(q));
+    for (const [p, q] of input.no) this.setLevelFp("no", parsePriceFp(p), parseQtyFp(q));
+    this.lastSourceSeq = input.seq;
     this.exchangeTsMs = input.exchangeTsMs ?? null;
     this.receivedEpochMs = input.receivedEpochMs;
   }
@@ -57,35 +105,32 @@ export class KalshiOrderBook {
     exchangeTsMs?: number | null;
     receivedEpochMs: number;
     side: BookSide;
-    price: number;
-    delta: number;
+    price: string | number;
+    delta: string | number;
   }) {
-    if (this.lastSeq && input.seq !== this.lastSeq + 1) {
-      throw new Error(`ORDERBOOK_SEQUENCE_GAP ${this.marketTicker}: expected ${this.lastSeq + 1}, got ${input.seq}`);
-    }
-    const price = quantizePrice(input.price);
+    const priceFp = parsePriceFp(input.price);
+    const deltaFp = parseSignedQtyFp(input.delta);
     const map = input.side === "yes" ? this.yes : this.no;
-    const next = (map.get(price) ?? 0) + input.delta;
-    if (next < -1e-9) throw new Error(`ORDERBOOK_NEGATIVE_QTY ${this.marketTicker} ${input.side} ${price}`);
-    this.setLevel(input.side, price, Math.max(0, next));
-    this.lastSeq = input.seq;
+    const next = (map.get(priceFp) ?? 0) + deltaFp;
+    if (next < 0) throw new Error(`ORDERBOOK_NEGATIVE_QTY ${this.marketTicker} ${input.side} ${input.price}`);
+    this.setLevelFp(input.side, priceFp, next);
+    this.lastSourceSeq = input.seq;
     this.exchangeTsMs = input.exchangeTsMs ?? this.exchangeTsMs;
     this.receivedEpochMs = input.receivedEpochMs;
   }
 
-  private setLevel(side: BookSide, rawPrice: number, qty: number) {
-    const price = quantizePrice(rawPrice);
-    if (!Number.isFinite(price) || price < 0 || price > 1) throw new Error(`BAD_PRICE ${rawPrice}`);
-    if (!Number.isFinite(qty) || qty < 0) throw new Error(`BAD_QTY ${qty}`);
+  private setLevelFp(side: BookSide, priceFp: number, qtyFp: number) {
+    if (!Number.isSafeInteger(priceFp) || priceFp < 0 || priceFp > PRICE_SCALE) throw new Error(`BAD_PRICE_FP ${priceFp}`);
+    if (!Number.isSafeInteger(qtyFp) || qtyFp < 0) throw new Error(`BAD_QTY_FP ${qtyFp}`);
     const map = side === "yes" ? this.yes : this.no;
-    if (qty === 0) map.delete(price);
-    else map.set(price, qty);
+    if (qtyFp === 0) map.delete(priceFp);
+    else map.set(priceFp, qtyFp);
   }
 
   snapshot(): KalshiBookSnapshot {
     return {
       marketTicker: this.marketTicker,
-      seq: this.lastSeq,
+      seq: this.lastSourceSeq,
       exchangeTsMs: this.exchangeTsMs,
       receivedEpochMs: this.receivedEpochMs,
       yesBids: normalize(this.yes),
@@ -96,51 +141,92 @@ export class KalshiOrderBook {
   bestYesBid() { return normalize(this.yes).at(-1) ?? null; }
   bestNoBid() { return normalize(this.no).at(-1) ?? null; }
 
-  // Kalshi exposes bids only. A NO bid at y is a YES ask at 1-y,
-  // and a YES bid at x is a NO ask at 1-x. Quantity is identical.
+  // Internal representation always uses native outcome-leg bid prices.
+  // Kalshi exposes bids only: NO bid y == YES ask (1-y), same quantity;
+  // YES bid x == NO ask (1-x), same quantity.
   yesAsks(): PriceLevel[] {
     return normalize(this.no)
-      .map((l) => ({ price: quantizePrice(1 - l.price), qty: l.qty }))
-      .sort((a, b) => a.price - b.price);
+      .map((l) => makeLevel(complementPriceFp(l.priceFp), l.qtyFp))
+      .sort((a, b) => a.priceFp - b.priceFp);
   }
 
   noAsks(): PriceLevel[] {
     return normalize(this.yes)
-      .map((l) => ({ price: quantizePrice(1 - l.price), qty: l.qty }))
-      .sort((a, b) => a.price - b.price);
+      .map((l) => makeLevel(complementPriceFp(l.priceFp), l.qtyFp))
+      .sort((a, b) => a.priceFp - b.priceFp);
   }
 }
 
+function parseSignedQtyFp(value: string | number) {
+  const text = String(value).trim();
+  const negative = text.startsWith("-");
+  const absolute = negative ? text.slice(1) : text;
+  const units = parseQtyFp(absolute);
+  return negative ? -units : units;
+}
+
+export type SimulatedFillLevel = {
+  priceFp: number;
+  qtyFp: number;
+  price: number;
+  qty: number;
+  notionalMicros: number;
+};
+
 export type SimulatedFill = {
   requestedQty: number;
+  requestedQtyFp: number;
   filledQty: number;
+  filledQtyFp: number;
   avgPrice: number | null;
+  avgPriceFpApprox: number | null;
   grossCost: number;
+  grossCostMicros: number;
   worstPrice: number | null;
-  levels: Array<{ price: number; qty: number }>;
+  worstPriceFp: number | null;
+  levels: SimulatedFillLevel[];
 };
 
 export function consumeAsTaker(book: KalshiOrderBook, outcome: BookSide, qty: number, maxPrice = 1): SimulatedFill {
+  const requestedQtyFp = parseQtyFp(qty);
+  const maxPriceFp = parsePriceFp(maxPrice);
   const asks = outcome === "yes" ? book.yesAsks() : book.noAsks();
-  let remaining = qty;
-  let cost = 0;
-  const levels: Array<{ price: number; qty: number }> = [];
-  const limit = quantizePrice(maxPrice);
-  for (const level of asks) {
-    if (remaining <= 1e-9 || level.price > limit) break;
-    const take = Math.min(level.qty, remaining);
-    if (take <= 0) continue;
-    levels.push({ price: level.price, qty: take });
-    cost += take * level.price;
-    remaining -= take;
+  let remainingFp = requestedQtyFp;
+  let costMicros = 0;
+  const levels: SimulatedFillLevel[] = [];
+
+  for (const bookLevel of asks) {
+    if (remainingFp <= 0 || bookLevel.priceFp > maxPriceFp) break;
+    const takeFp = Math.min(bookLevel.qtyFp, remainingFp);
+    if (takeFp <= 0) continue;
+    const levelNotionalMicros = notionalMicros(bookLevel.priceFp, takeFp);
+    levels.push({
+      priceFp: bookLevel.priceFp,
+      qtyFp: takeFp,
+      price: priceFpToDollars(bookLevel.priceFp),
+      qty: qtyFpToContracts(takeFp),
+      notionalMicros: levelNotionalMicros,
+    });
+    costMicros += levelNotionalMicros;
+    remainingFp -= takeFp;
   }
-  const filledQty = qty - remaining;
+
+  const filledQtyFp = requestedQtyFp - remainingFp;
+  const avgPrice = filledQtyFp > 0
+    ? microsToDollars(costMicros) / qtyFpToContracts(filledQtyFp)
+    : null;
+
   return {
-    requestedQty: qty,
-    filledQty,
-    avgPrice: filledQty > 0 ? quantizePrice(cost / filledQty) : null,
-    grossCost: quantizePrice(cost),
+    requestedQty: qtyFpToContracts(requestedQtyFp),
+    requestedQtyFp,
+    filledQty: qtyFpToContracts(filledQtyFp),
+    filledQtyFp,
+    avgPrice,
+    avgPriceFpApprox: avgPrice === null ? null : Math.round(avgPrice * PRICE_SCALE),
+    grossCost: microsToDollars(costMicros),
+    grossCostMicros: costMicros,
     worstPrice: levels.length ? levels[levels.length - 1].price : null,
+    worstPriceFp: levels.length ? levels[levels.length - 1].priceFp : null,
     levels,
   };
 }
