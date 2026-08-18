@@ -44,7 +44,11 @@ export async function getMetars(
       receivedAt: new Date(report.receiptTime).toISOString(),
       receiptQuality: "actual",
       temperatureF: cToF(report.temp as number),
-      settlementCompatible: true,
+      // AWC is an important upstream observation source, but a METAR current
+      // temperature is NOT automatically identical to the value/method used by
+      // the event's versioned settlement source. Hard-state strategies must earn
+      // compatibility through a separately audited settlement transformation.
+      settlementCompatible: false,
       rawText: report.rawOb,
       dewpointF: typeof report.dewp === "number" ? cToF(report.dewp) : null,
       windDirection: (report.wdir as number | string | undefined) ?? null,
