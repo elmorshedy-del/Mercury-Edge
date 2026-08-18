@@ -9,7 +9,7 @@ from typing import Any
 import psycopg
 
 import paper_engine as dbn
-from strategy_engines import execute_extra_strategies
+from strategy_runtime import execute_extra_strategies
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_ID = os.environ["PAPER_SESSION_ID"]
