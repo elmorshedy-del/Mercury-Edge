@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS market_data_journal (
   received_epoch_ms bigint NOT NULL,
   received_epoch_ns numeric(20,0) NOT NULL,
   received_monotonic_ns numeric(20,0) NOT NULL,
+  raw_text text NOT NULL,
   payload jsonb NOT NULL,
   payload_sha256 text NOT NULL,
   UNIQUE(session_id, sid, seq, payload_sha256)
@@ -117,3 +118,21 @@ CREATE TABLE IF NOT EXISTS audit_findings (
 );
 CREATE INDEX IF NOT EXISTS audit_findings_open_idx
   ON audit_findings(severity, component, detected_at) WHERE resolved_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS paper_replay_runs (
+  id bigserial PRIMARY KEY,
+  session_id text NOT NULL REFERENCES paper_sessions(id) ON DELETE CASCADE,
+  auditor_version text NOT NULL,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz,
+  status text NOT NULL,
+  journal_rows bigint NOT NULL DEFAULT 0,
+  integrity_failures integer NOT NULL DEFAULT 0,
+  sequence_gaps integer NOT NULL DEFAULT 0,
+  book_errors integer NOT NULL DEFAULT 0,
+  journal_chain_sha256 text,
+  final_book_state_sha256 text,
+  summary jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS paper_replay_runs_session_idx
+  ON paper_replay_runs(session_id, started_at DESC);
