@@ -1,0 +1,31 @@
+name: Probe Backtest Results
+
+on:
+  push:
+    branches: [paper-trader-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Mercury aggregate results
+        run: |
+          python - <<'PY'
+          import json, urllib.request
+          url='https://mercury-edge-web-production.up.railway.app/api/results'
+          with urllib.request.urlopen(url, timeout=30) as r:
+              data=json.load(r)
+          print('LATEST_RUN', json.dumps(data.get('latestRun'), sort_keys=True))
+          print('STATIONS')
+          for row in sorted(data.get('stations', []), key=lambda x: (-(x.get('netProfit') or 0), -(x.get('averageLagSeconds') or 0))):
+              print(json.dumps(row, sort_keys=True))
+          print('SIGNALS')
+          for row in sorted(data.get('signals', []), key=lambda x: (x.get('reactionLagSeconds') or -1), reverse=True):
+              print(json.dumps(row, sort_keys=True))
+          print('COVERAGE')
+          for row in data.get('coverage', []):
+              print(json.dumps(row, sort_keys=True))
+          PY
