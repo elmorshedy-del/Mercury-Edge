@@ -37,7 +37,7 @@ test("latency replay uses the last book state valid through simulated arrival", 
   // the future 1,260 state backward to a 1,250 order arrival.
   assert.equal(executions[0].bookReceivedEpochMs, 1_200);
   assert.equal(executions[0].stateKnownThroughEpochMs, 1_260);
-  assert.equal(executions[0].fill.avgPrice, 0.33);
+  assert.ok(Math.abs((executions[0].fill.avgPrice ?? 0) - 0.33) < 1e-12);
 });
 
 test("FOK refuses a partial fill rather than pretending available depth filled everything", () => {
@@ -64,7 +64,7 @@ test("IOC can model a legitimate fractional partial fill and its fees", () => {
   });
   assert.equal(result.status, "partial");
   assert.equal(result.fill.filledQty, 1.5);
-  assert.equal(result.fill.avgPrice, 0.33);
+  assert.ok(Math.abs((result.fill.avgPrice ?? 0) - 0.33) < 1e-12);
   assert.ok((result.fee ?? 0) > 0);
   assert.equal(result.blockReason, null);
 });
