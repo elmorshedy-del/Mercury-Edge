@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import signal
@@ -11,8 +12,19 @@ import uuid
 from stations import MARKET_SERIES, OMO_DEFAULT_NETWORKS, WEATHER_STATIONS
 
 
+def normalize_private_key_env(env: dict[str, str]) -> None:
+    """Accept either raw PEM or already-base64 PEM without logging key material."""
+    value = env.get("KALSHI_PRIVATE_KEY_PEM_B64", "").strip()
+    if not value:
+        return
+    normalized = value.replace("\\n", "\n")
+    if "-----BEGIN " in normalized and "PRIVATE KEY-----" in normalized:
+        env["KALSHI_PRIVATE_KEY_PEM_B64"] = base64.b64encode(normalized.encode("utf-8")).decode("ascii")
+
+
 def main() -> int:
     env = os.environ.copy()
+    normalize_private_key_env(env)
     env.setdefault("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
 
     # Collect broadly while keeping the expensive high-frequency IEM path focused.
