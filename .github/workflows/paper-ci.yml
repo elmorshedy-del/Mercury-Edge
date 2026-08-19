@@ -39,3 +39,31 @@ jobs:
       - run: python -m unittest -v test_strategy_engines.py test_asos_evidence.py test_market_calendar.py test_hard_state_proof.py test_hard_state_integration.py test_hard_information_domain.py test_raw_journal.py
       - run: python -c "import websockets, cryptography, psycopg; print(websockets.__version__, cryptography.__version__, psycopg.__version__)"
       - run: docker build -t mercury-paper-collector .
+
+  migration-checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mercury
+          POSTGRES_PASSWORD: mercury
+          POSTGRES_DB: mercury_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mercury -d mercury_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://mercury:mercury@localhost:5432/mercury_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - run: npm ci
+      - run: ./node_modules/.bin/tsx scripts/migrate.ts
+      - run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/tests/013_immutable_hard_information_journal_test.sql
