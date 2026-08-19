@@ -8,8 +8,9 @@ settlement-compatible canonical hard state establishes that a bucket is
 impossible.
 
 Step 4D makes the source-neutral accumulator authoritative for new immutable
-captures. Raw ASOS syntax ends in the adapter; strategies consume only the
-canonical monotonic HardClimateState and its append-only timeline.
+captures. Step 4E makes pure bucket elimination authoritative downstream: raw
+weather syntax and source identity are no longer involved once HardClimateState
+exists.
 """
 
 import json
@@ -18,14 +19,14 @@ from typing import Any
 
 import psycopg
 
+import bucket_elimination
 import hard_state_proof
 import paper_engine as base
 import raw_journal
 import risk_controls
-from hard_information_domain import HardClimateState
+from hard_information_domain import BucketElimination, HardClimateState
 from hard_state_accumulator import HardStateTimeline, accumulate_hard_state
 import hard_state_journal
-from market_calendar import event_matches_observation
 from stations import STATIONS
 
 # Re-export the primitives used by unified_engine / strategy runtime.
@@ -132,11 +133,14 @@ def _attach_proof_to_signal(
     timeline: HardStateTimeline | None = None,
     application_ids: tuple[str, ...] = (),
     transition_ids: tuple[str, ...] = (),
+    elimination: BucketElimination | None = None,
+    elimination_context: dict[str, Any] | None = None,
 ) -> None:
-    """Persist raw provenance, canonical state, and timeline beside the signal."""
+    """Persist raw provenance, canonical state, timeline, and elimination proof."""
     proof_payload = proof.as_dict()
     state_payload = state.to_dict()
     timeline_payload = timeline.to_dict() if timeline is not None else None
+    elimination_payload = elimination.to_dict() if elimination is not None else None
     conn.execute(
         """
         UPDATE paper_signals
@@ -153,7 +157,10 @@ def _attach_proof_to_signal(
                  'immutable_provenance_complete', %s,
                  'evidence_derivation_ids', %s::jsonb,
                  'hard_state_application_ids', %s::jsonb,
-                 'hard_state_transition_ids', %s::jsonb
+                 'hard_state_transition_ids', %s::jsonb,
+                 'bucket_elimination', %s::jsonb,
+                 'elimination_context', %s::jsonb,
+                 'elimination_model_version', %s
                )
          WHERE id=%s
         """,
@@ -171,6 +178,9 @@ def _attach_proof_to_signal(
             json.dumps(list(persisted_evidence_ids), separators=(",", ":")),
             json.dumps(list(application_ids), separators=(",", ":")),
             json.dumps(list(transition_ids), separators=(",", ":")),
+            json.dumps(elimination_payload, separators=(",", ":"), default=base.json_default),
+            json.dumps(elimination_context, separators=(",", ":"), default=base.json_default),
+            bucket_elimination.ELIMINATION_MODEL_VERSION,
             signal_id,
         ),
     )
@@ -234,19 +244,66 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
 
     series = meta["series"]
     series_rules = base.series_rules_before(conn, series, state.first_known_at)
-    event_rules = [
-        event
-        for event in base.event_rule_candidates(conn, series, state.first_known_at)
-        if event_matches_observation(event["event_ticker"], weather["observed_at"], timezone_name)
-    ]
+    # Do not pre-decide event date here. Every candidate snapshot goes through
+    # the pure elimination engine, which independently enforces station/date.
+    event_rules = base.event_rule_candidates(conn, series, state.first_known_at)
 
     candidates: list[base.Candidate] = []
     for event in event_rules:
-        for market in event["markets"]:
-            upper = base.market_upper_bound(market)
-            ticker = str(market.get("ticker") or "")
-            if not ticker or upper is None or not state.proves_above(upper):
+        event_for_elimination = dict(event)
+        # Kalshi event snapshots do not carry the settlement-station ICAO code;
+        # the series/station adapter that selected this event supplies it here.
+        event_for_elimination["station_code"] = station
+        result = bucket_elimination.evaluate_event(event_for_elimination, state)
+        if not result.accepted:
+            # Other open daily events are expected to fail the date guard; only
+            # malformed metadata for the target date is an audit error.
+            if result.fail_closed_reason != "event_climate_date_mismatch":
+                base.audit_error(conn, "BUCKET_ELIMINATION_FAIL_CLOSED", {
+                    "weather_id": weather["id"],
+                    "event_ticker": event.get("event_ticker"),
+                    "hard_state_id": state.state_id,
+                    "reason": result.fail_closed_reason,
+                    "elimination_model_version": bucket_elimination.ELIMINATION_MODEL_VERSION,
+                }, station)
+            continue
+
+        markets_by_ticker = {
+            str(market.get("ticker") or ""): market
+            for market in event["markets"]
+            if isinstance(market, dict) and market.get("ticker")
+        }
+        context_payload = {
+            "event_ticker": result.event_ticker,
+            "station_code": result.station_code,
+            "climate_date": result.climate_date,
+            "hard_state_id": result.hard_state_id,
+            "transition_evidence_id": result.transition_evidence_id,
+            "event_rules_hash": result.event_rules_hash,
+            "elimination_model_version": result.elimination_model_version,
+            "dead_market_tickers": list(result.dead_market_tickers),
+        }
+
+        for elimination in result.eliminated:
+            market = markets_by_ticker.get(elimination.market_ticker)
+            if market is None:
+                base.audit_error(conn, "ELIMINATED_MARKET_NOT_IN_SNAPSHOT", {
+                    "event_ticker": result.event_ticker,
+                    "market_ticker": elimination.market_ticker,
+                    "elimination_id": elimination.elimination_id,
+                }, station)
                 continue
+            upper = base.market_upper_bound(market)
+            if upper is None:
+                # Should be unreachable: the elimination engine cannot eliminate
+                # an unbounded upper tail. Preserve fail-closed behavior anyway.
+                base.audit_error(conn, "ELIMINATION_WITHOUT_FINITE_CAP", {
+                    "event_ticker": result.event_ticker,
+                    "market_ticker": elimination.market_ticker,
+                    "elimination_id": elimination.elimination_id,
+                }, station)
+                continue
+
             signal_id, auditor_status = base.insert_signal(
                 conn,
                 weather=weather,
@@ -267,6 +324,8 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 timeline,
                 application_ids,
                 transition_ids,
+                elimination,
+                context_payload,
             )
 
             if auditor_status != "approved" or not strategy["paper_trade_enabled"]:
@@ -278,7 +337,7 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 station=station,
                 region=meta.get("region", station),
                 event_ticker=event["event_ticker"],
-                market_ticker=ticker,
+                market_ticker=elimination.market_ticker,
                 trigger_at=state.first_known_at,
                 trigger_epoch_ms=trigger_epoch_ms,
                 confirmed_high_f=confirmed_high,
@@ -307,6 +366,9 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                     "evidence_derivation_ids": list(persisted_evidence_ids),
                     "hard_state_application_ids": list(application_ids),
                     "hard_state_transition_ids": list(transition_ids),
+                    "bucket_elimination": elimination.to_dict(),
+                    "elimination_context": context_payload,
+                    "elimination_model_version": bucket_elimination.ELIMINATION_MODEL_VERSION,
                     "station_timezone": timezone_name,
                 },
             ))
