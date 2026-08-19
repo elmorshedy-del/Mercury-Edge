@@ -135,6 +135,8 @@ class DbnProofIntegrationTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].confirmed_high_f, Decimal("88"))
         self.assertEqual(captured[0].evidence["hard_state_proof"]["trigger_raw_group"], "T03110200")
+        self.assertEqual(captured[0].evidence["hard_climate_state"]["proven_daily_high_min_f"], 88)
+        self.assertEqual(captured[0].evidence["hard_climate_state"]["station_code"], "KPHL")
 
     def test_repeated_same_bound_does_not_retrigger_dbn(self) -> None:
         conn = FakeConnection()
@@ -169,15 +171,19 @@ class DbnProofIntegrationTests(unittest.TestCase):
         self.assertEqual(count, 0)  # shadow-only signals are not executable candidates
         self.assertEqual(tickers, ["KXHIGHPHIL-26AUG18"])
 
-    def test_signal_update_contains_raw_provenance(self) -> None:
+    def test_signal_update_contains_raw_provenance_and_canonical_state(self) -> None:
         conn = FakeConnection()
         proof = make_proof(88)
-        dbn._attach_proof_to_signal(conn, 99, proof)
+        state = proof.to_hard_state("KPHL")
+        dbn._attach_proof_to_signal(conn, 99, proof, state)
         self.assertEqual(len(conn.calls), 1)
         params = conn.calls[0][1]
-        payload = json.loads(params[0])
-        self.assertEqual(payload["trigger_raw_group"], "T03110200")
-        self.assertEqual(payload["proven_daily_high_min_f"], 88)
+        proof_payload = json.loads(params[0])
+        state_payload = json.loads(params[1])
+        self.assertEqual(proof_payload["trigger_raw_group"], "T03110200")
+        self.assertEqual(proof_payload["proven_daily_high_min_f"], 88)
+        self.assertEqual(state_payload["proven_daily_high_min_f"], 88)
+        self.assertEqual(state_payload["station_code"], "KPHL")
         self.assertEqual(params[-1], 99)
 
 
