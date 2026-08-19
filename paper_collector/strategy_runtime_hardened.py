@@ -7,9 +7,9 @@ Benchmark sleeves spend cash only on signals whose strategy configuration says
 Everything else can still be simulated in the independent shadow lab.
 
 Deterministic hard-state strategies (DSN/SBK/HSR) are constructed only from the
-raw-ASOS proof layer. Probabilistic/precision research remains on the legacy
-weather context until its own dedicated refactor steps, preventing the two
-classes from being silently mixed.
+canonical monotonic hard-state accumulator. Probabilistic/precision research
+remains on the legacy weather context until its own dedicated refactor steps,
+preventing the two classes from being silently mixed.
 """
 
 from datetime import datetime
@@ -19,6 +19,8 @@ from typing import Any
 import psycopg
 
 import hard_state_proof
+from hard_information_domain import HardClimateState
+from hard_state_accumulator import HardStateTimeline, accumulate_hard_state
 import risk_controls
 import shadow_lab
 import strategy_engines as se
@@ -60,35 +62,103 @@ def _benchmark_eligible(bundle: se.Bundle, cfg: dict[str, Any]) -> bool:
     )
 
 
+def _canonical_state_for_proof(
+    proof: hard_state_proof.HardStateProof,
+    station_code: str,
+) -> tuple[HardClimateState, HardStateTimeline | None]:
+    evidence = proof.all_canonical_evidence(station_code)
+    if evidence:
+        timeline = accumulate_hard_state(
+            evidence,
+            station_code=station_code,
+            climate_date=proof.climate_trade_date,
+        )
+        if timeline.current_state is not None:
+            return timeline.current_state, timeline
+    # Historical/test compatibility only; new immutable captures have evidence.
+    return proof.to_hard_state(station_code), None
+
+
+def _transition_record(
+    proof: hard_state_proof.HardStateProof,
+    station_code: str,
+    state: HardClimateState,
+) -> hard_state_proof.ProofRecord | None:
+    for record, evidence in zip(proof.evidence_records, proof.all_canonical_evidence(station_code)):
+        if evidence.evidence_id == state.transition_evidence_id:
+            return record
+    return None
+
+
 def _hard_transition_weather(
     conn: psycopg.Connection[Any],
     session_id: str,
     weather: dict[str, Any],
     timezone_name: str,
 ) -> tuple[hard_state_proof.HardStateProof | None, dict[str, Any] | None]:
-    """Create a strategy weather view only when raw evidence raises the daily lower bound."""
+    """Create a strategy view only when canonical state rises on this weather row."""
     proof = hard_state_proof.proof_for_weather(
         conn,
         session_id=session_id,
         weather=weather,
         timezone_name=timezone_name,
     )
-    if proof is None or not proof.is_new_transition(weather["id"]):
+    if proof is None:
         return None, None
+
+    station_code = str(weather["station_code"])
+    state, timeline = _canonical_state_for_proof(proof, station_code)
+    transition_record = _transition_record(proof, station_code, state)
+    if transition_record is not None:
+        if transition_record.weather_id != int(weather["id"]):
+            return None, None
+    elif not proof.is_new_transition(weather["id"]):
+        return None, None
+
     guarded = dict(weather)
-    guarded["max_temperature_f"] = Decimal(proof.proven_daily_high_min_f)
-    guarded["first_seen_at"] = proof.trigger_at
-    guarded["received_epoch_ms"] = proof.trigger_epoch_ms
+    guarded["max_temperature_f"] = Decimal(state.proven_daily_high_min_f)
+    guarded["first_seen_at"] = state.first_known_at
+    guarded["received_epoch_ms"] = int(state.first_known_at.timestamp() * 1000)
+    guarded["hard_climate_state"] = state.to_dict()
+    guarded["hard_state_timeline"] = timeline.to_dict() if timeline is not None else None
+    guarded["transition_evidence_id"] = state.transition_evidence_id
     return proof, guarded
 
 
-def _attach_hard_proof(bundle: se.Bundle, proof: hard_state_proof.HardStateProof, timezone_name: str) -> None:
+def _attach_hard_proof(
+    bundle: se.Bundle,
+    proof: hard_state_proof.HardStateProof,
+    timezone_name: str,
+    hard_weather: dict[str, Any] | None = None,
+) -> None:
     bundle.evidence["hard_state_proof"] = proof.as_dict()
-    bundle.evidence["proof_version"] = "raw-asos-lattice-v1"
-    bundle.evidence["proven_daily_high_min_f"] = proof.proven_daily_high_min_f
-    bundle.evidence["climate_trade_date"] = proof.climate_trade_date.isoformat()
-    bundle.evidence["trigger_evidence_grade"] = proof.trigger_grade
-    bundle.evidence["trigger_raw_group"] = proof.trigger_raw_group
+    bundle.evidence["proof_version"] = hard_state_proof.PROOF_VERSION
+    if hard_weather and isinstance(hard_weather.get("hard_climate_state"), dict):
+        state = hard_weather["hard_climate_state"]
+        bundle.evidence["hard_climate_state"] = state
+        bundle.evidence["hard_state_timeline"] = hard_weather.get("hard_state_timeline")
+        bundle.evidence["proven_daily_high_min_f"] = int(state["proven_daily_high_min_f"])
+        bundle.evidence["climate_trade_date"] = str(state["climate_date"])
+        bundle.evidence["transition_evidence_id"] = str(state["transition_evidence_id"])
+        transition_id = str(state["transition_evidence_id"])
+        transition_record = next(
+            (
+                record
+                for record, evidence in zip(
+                    proof.evidence_records,
+                    proof.all_canonical_evidence(bundle.station),
+                )
+                if evidence.evidence_id == transition_id
+            ),
+            None,
+        )
+        bundle.evidence["trigger_evidence_grade"] = transition_record.grade if transition_record else proof.trigger_grade
+        bundle.evidence["trigger_raw_group"] = transition_record.raw_group if transition_record else proof.trigger_raw_group
+    else:
+        bundle.evidence["proven_daily_high_min_f"] = proof.proven_daily_high_min_f
+        bundle.evidence["climate_trade_date"] = proof.climate_trade_date.isoformat()
+        bundle.evidence["trigger_evidence_grade"] = proof.trigger_grade
+        bundle.evidence["trigger_raw_group"] = proof.trigger_raw_group
     bundle.evidence["source_weather_ids_at_bound"] = list(proof.source_weather_ids_at_bound)
     bundle.evidence["station_timezone"] = timezone_name
 
@@ -162,7 +232,7 @@ def execute_extra_strategies(
     if not timezone_name:
         return 0
 
-    # Deterministic path: only a newly raised raw-ASOS lower bound can create
+    # Deterministic path: only a newly raised canonical lower bound can create
     # DSN/SBK/HSR bundles.
     proof, hard_weather = _hard_transition_weather(conn, session_id, weather, timezone_name)
 
@@ -211,7 +281,7 @@ def execute_extra_strategies(
                 hard_configs,
             )
             for bundle in hard_bundles:
-                _attach_hard_proof(bundle, proof, timezone_name)
+                _attach_hard_proof(bundle, proof, timezone_name, hard_weather)
             bundles.extend(hard_bundles)
 
         # Everything below remains research semantics for this step. It is
@@ -314,7 +384,7 @@ def execute_extra_strategies(
                 continue
 
             if bundle.strategy_code in _HARD_CORE:
-                # A hard-core bundle can exist only through the proof branch.
+                # A hard-core bundle can exist only through the canonical proof branch.
                 if proof is None or "hard_state_proof" not in bundle.evidence:
                     continue
             elif same_day_high is not None:
