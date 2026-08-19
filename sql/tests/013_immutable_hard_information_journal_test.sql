@@ -12,7 +12,7 @@ INSERT INTO raw_source_journal(
   'raw:ci','ci-immutable-journal','NOAA_AWC','metar_json','KPHL',
   '2026-08-18T18:54:00Z','2026-08-18T18:55:00Z',1770000000000000000,
   123,'https_poll','application/json',convert_to('{"rawOb":"KPHL ..."}','UTF8'),
-  '0b9056d5739ed8f75b719e643f282061711b6f8a16c17e766e824434b09f1a70','{}'::jsonb
+  '1a509322811d739c8ede19ff4094e52ff514c64980c5da8706630bbe0fa35da9','{}'::jsonb
 ) ON CONFLICT (capture_id) DO NOTHING;
 
 DO $$
