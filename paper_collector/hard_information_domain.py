@@ -6,7 +6,7 @@ These types deliberately separate source transport, normalized observations,
 settlement evidence, derived climate state, bucket elimination, execution state,
 and post-trade settlement truth.
 
-The module contains no source-specific parser and no strategy logic.  That is an
+The module contains no source-specific parser and no strategy logic. That is an
 architectural invariant: weather syntax belongs in adapters/parsers; strategies
 consume only canonical hard state and elimination objects.
 """
@@ -124,7 +124,36 @@ class NormalizedObservation:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return _encode(self)
+        value_type = "decimal" if isinstance(self.value, Decimal) else "int" if isinstance(self.value, int) else "str"
+        result = _encode(self)
+        result["value_type"] = value_type
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "NormalizedObservation":
+        value_type = str(value.get("value_type", "str"))
+        raw_value = value["value"]
+        if value_type == "decimal":
+            restored_value: Decimal | int | str = Decimal(str(raw_value))
+        elif value_type == "int":
+            restored_value = int(raw_value)
+        elif value_type == "str":
+            restored_value = str(raw_value)
+        else:
+            raise ValueError(f"unsupported observation value_type={value_type!r}")
+        return cls(
+            observation_id=str(value["observation_id"]),
+            source_record_id=str(value["source_record_id"]),
+            station_code=str(value["station_code"]),
+            climate_date=_date(value["climate_date"]),
+            observation_type=str(value["observation_type"]),
+            value=restored_value,
+            unit=_optional_str(value.get("unit")),
+            clocks=SourceClocks.from_dict(_mapping(value["clocks"])),
+            parser_version=str(value["parser_version"]),
+            calendar_version=str(value["calendar_version"]),
+            metadata=_mapping(value.get("metadata", {})),
+        )
 
 
 @dataclass(frozen=True)
@@ -165,6 +194,28 @@ class SettlementEvidence:
 
     def to_dict(self) -> dict[str, Any]:
         return _encode(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "SettlementEvidence":
+        return cls(
+            evidence_id=str(value["evidence_id"]),
+            evidence_type=EvidenceType(str(value["evidence_type"])),
+            station_code=str(value["station_code"]),
+            climate_date=_date(value["climate_date"]),
+            source_record_ids=tuple(str(v) for v in value.get("source_record_ids", [])),
+            proven_min_f=_optional_int(value.get("proven_min_f")),
+            proven_max_f=_optional_int(value.get("proven_max_f")),
+            integrity_status=IntegrityStatus(str(value["integrity_status"])),
+            trust=EvidenceTrust(str(value["trust"])),
+            clocks=SourceClocks.from_dict(_mapping(value["clocks"])),
+            parser_version=str(value["parser_version"]),
+            evidence_model_version=str(value["evidence_model_version"]),
+            calendar_version=str(value["calendar_version"]),
+            raw_identifier=_optional_str(value.get("raw_identifier")),
+            possible_canonical_f=tuple(int(v) for v in value.get("possible_canonical_f", [])),
+            fail_closed_reason=_optional_str(value.get("fail_closed_reason")),
+            metadata=_mapping(value.get("metadata", {})),
+        )
 
 
 @dataclass(frozen=True)
@@ -221,6 +272,22 @@ class BucketElimination:
     def to_dict(self) -> dict[str, Any]:
         return _encode(self)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "BucketElimination":
+        return cls(
+            elimination_id=str(value["elimination_id"]),
+            event_ticker=str(value["event_ticker"]),
+            market_ticker=str(value["market_ticker"]),
+            station_code=str(value["station_code"]),
+            climate_date=_date(value["climate_date"]),
+            hard_state_id=str(value["hard_state_id"]),
+            hard_lower_bound_f=int(value["hard_lower_bound_f"]),
+            strike_rule=str(value["strike_rule"]),
+            eliminated=bool(value["eliminated"]),
+            elimination_model_version=str(value["elimination_model_version"]),
+            reason=str(value["reason"]),
+        )
+
 
 @dataclass(frozen=True)
 class ExecutableMarketState:
@@ -238,10 +305,23 @@ class ExecutableMarketState:
     def to_dict(self) -> dict[str, Any]:
         return _encode(self)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutableMarketState":
+        return cls(
+            event_ticker=str(value["event_ticker"]),
+            market_ticker=str(value["market_ticker"]),
+            captured_at=_datetime(value["captured_at"]),
+            no_ask=_optional_decimal(value.get("no_ask")),
+            no_ask_quantity=_optional_decimal(value.get("no_ask_quantity")),
+            fee_estimate=_optional_decimal(value.get("fee_estimate")),
+            market_data_version=str(value["market_data_version"]),
+            source_record_id=_optional_str(value.get("source_record_id")),
+        )
+
 
 @dataclass(frozen=True)
 class SettlementTruth:
-    """Validation/settlement label.  It is not ordinary intraday trade evidence."""
+    """Validation/settlement label. It is not ordinary intraday trade evidence."""
 
     truth_id: str
     source: str
@@ -256,6 +336,21 @@ class SettlementTruth:
 
     def to_dict(self) -> dict[str, Any]:
         return _encode(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "SettlementTruth":
+        return cls(
+            truth_id=str(value["truth_id"]),
+            source=str(value["source"]),
+            station_code=str(value["station_code"]),
+            climate_date=_date(value["climate_date"]),
+            final_max_f=_optional_int(value.get("final_max_f")),
+            status=str(value["status"]),
+            source_record_id=str(value["source_record_id"]),
+            observed_or_issued_at=_datetime(value["observed_or_issued_at"]),
+            truth_model_version=str(value["truth_model_version"]),
+            revision_of=_optional_str(value.get("revision_of")),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -307,3 +402,11 @@ def _date(value: Any) -> date:
 
 def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
