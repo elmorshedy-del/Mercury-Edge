@@ -4,11 +4,12 @@ from __future__ import annotations
 
 The original implementation is retained for replay compatibility. Live paper
 execution imports this module instead so DBN spends benchmark cash only when a
-raw-ASOS proof object establishes that the relevant bucket is impossible.
+settlement-compatible canonical hard state establishes that a bucket is
+impossible.
 
-Step 4 adds a domain boundary: raw proof remains attached for provenance, but
-bucket elimination consumes a source-neutral HardClimateState. New source
-captures also persist versioned evidence derivations linked to immutable bytes.
+Step 4D makes the source-neutral accumulator authoritative for new immutable
+captures. Raw ASOS syntax ends in the adapter; strategies consume only the
+canonical monotonic HardClimateState and its append-only timeline.
 """
 
 import json
@@ -22,6 +23,8 @@ import paper_engine as base
 import raw_journal
 import risk_controls
 from hard_information_domain import HardClimateState
+from hard_state_accumulator import HardStateTimeline, accumulate_hard_state
+import hard_state_journal
 from market_calendar import event_matches_observation
 from stations import STATIONS
 
@@ -61,13 +64,7 @@ def _persist_canonical_evidence(
     proof: hard_state_proof.HardStateProof,
     station: str,
 ) -> tuple[str, ...]:
-    """Append every accepted versioned ASOS derivation with immutable provenance.
-
-    A routine METAR can contain a lower current value plus a higher six-hour
-    maximum. Both facts are persisted independently even though only the latter
-    establishes the current hard-state bound. Historical rows created before
-    Step 4B remain replayable but are not back-filled with invented provenance.
-    """
+    """Append every accepted versioned ASOS derivation with immutable provenance."""
     persisted: list[str] = []
     for record, evidence in zip(proof.evidence_records, proof.all_canonical_evidence(station)):
         if record.raw_source_id is None:
@@ -81,22 +78,72 @@ def _persist_canonical_evidence(
     return tuple(persisted)
 
 
+def _timeline_from_proof(
+    proof: hard_state_proof.HardStateProof,
+    station: str,
+) -> HardStateTimeline | None:
+    evidence = proof.all_canonical_evidence(station)
+    if not evidence:
+        return None
+    return accumulate_hard_state(
+        evidence,
+        station_code=station,
+        climate_date=proof.climate_trade_date,
+    )
+
+
+def _transition_record(
+    proof: hard_state_proof.HardStateProof,
+    station: str,
+    state: HardClimateState,
+) -> hard_state_proof.ProofRecord | None:
+    for record, evidence in zip(proof.evidence_records, proof.all_canonical_evidence(station)):
+        if evidence.evidence_id == state.transition_evidence_id:
+            return record
+    return None
+
+
+def _current_weather_created_transition(
+    proof: hard_state_proof.HardStateProof,
+    station: str,
+    state: HardClimateState,
+    current_weather_id: int,
+) -> bool:
+    record = _transition_record(proof, station, state)
+    if record is not None:
+        return record.weather_id == int(current_weather_id)
+    # Backward-compatible fixtures/historical rows created before the canonical
+    # evidence adapter existed. New immutable captures always take the path above.
+    return proof.is_new_transition(current_weather_id)
+
+
+def _immutable_history_complete(proof: hard_state_proof.HardStateProof) -> bool:
+    return bool(proof.evidence_records) and all(
+        record.raw_source_id is not None for record in proof.evidence_records
+    )
+
+
 def _attach_proof_to_signal(
     conn: psycopg.Connection[Any],
     signal_id: int,
     proof: hard_state_proof.HardStateProof,
     state: HardClimateState,
     persisted_evidence_ids: tuple[str, ...] = (),
+    timeline: HardStateTimeline | None = None,
+    application_ids: tuple[str, ...] = (),
+    transition_ids: tuple[str, ...] = (),
 ) -> None:
-    """Persist raw provenance and the canonical hard state beside the signal."""
+    """Persist raw provenance, canonical state, and timeline beside the signal."""
     proof_payload = proof.as_dict()
     state_payload = state.to_dict()
+    timeline_payload = timeline.to_dict() if timeline is not None else None
     conn.execute(
         """
         UPDATE paper_signals
            SET evidence = evidence || jsonb_build_object(
                  'hard_state_proof', %s::jsonb,
                  'hard_climate_state', %s::jsonb,
+                 'hard_state_timeline', %s::jsonb,
                  'proof_version', %s,
                  'hard_state_model_version', %s,
                  'proven_daily_high_min_f', %s,
@@ -104,21 +151,26 @@ def _attach_proof_to_signal(
                  'trigger_evidence_grade', %s,
                  'trigger_raw_group', %s,
                  'immutable_provenance_complete', %s,
-                 'evidence_derivation_ids', %s::jsonb
+                 'evidence_derivation_ids', %s::jsonb,
+                 'hard_state_application_ids', %s::jsonb,
+                 'hard_state_transition_ids', %s::jsonb
                )
          WHERE id=%s
         """,
         (
             json.dumps(proof_payload, separators=(",", ":"), default=base.json_default),
             json.dumps(state_payload, separators=(",", ":"), default=base.json_default),
+            json.dumps(timeline_payload, separators=(",", ":"), default=base.json_default),
             hard_state_proof.PROOF_VERSION,
             state.state_model_version,
             state.proven_daily_high_min_f,
             state.climate_date.isoformat(),
-            proof.trigger_grade,
-            proof.trigger_raw_group,
+            (_transition_record(proof, state.station_code, state).grade if _transition_record(proof, state.station_code, state) else proof.trigger_grade),
+            (_transition_record(proof, state.station_code, state).raw_group if _transition_record(proof, state.station_code, state) else proof.trigger_raw_group),
             proof.immutable_provenance_complete,
             json.dumps(list(persisted_evidence_ids), separators=(",", ":")),
+            json.dumps(list(application_ids), separators=(",", ":")),
+            json.dumps(list(transition_ids), separators=(",", ":")),
             signal_id,
         ),
     )
@@ -144,16 +196,41 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
         weather=weather,
         timezone_name=timezone_name,
     )
-    if proof is None or not proof.is_new_transition(weather["id"]):
+    if proof is None:
         return 0
 
-    # Raw syntax ends at the proof adapter. From this point onward, deterministic
-    # elimination uses only the canonical source-neutral state.
-    state = proof.to_hard_state(station)
+    # Persist every accepted derivation first, including lower/equal evidence.
+    # This is what lets later six-hour disclosure remain visible as corroboration
+    # without rewriting the first-known transition.
     persisted_evidence_ids = _persist_canonical_evidence(conn, proof, station)
+    timeline = _timeline_from_proof(proof, station)
+
+    application_ids: tuple[str, ...] = ()
+    transition_ids: tuple[str, ...] = ()
+    if timeline is not None and _immutable_history_complete(proof):
+        application_ids, transition_ids = hard_state_journal.persist_timeline(
+            conn,
+            session_id=base.SESSION_ID,
+            timeline=timeline,
+        )
+
+    if timeline is not None and timeline.current_state is not None:
+        state = timeline.current_state
+    else:
+        # Historical compatibility only. New Step-4B captures always have a
+        # canonical evidence history and therefore use the accumulator path.
+        state = proof.to_hard_state(station)
+
+    if not _current_weather_created_transition(proof, station, state, int(weather["id"])):
+        return 0
+
+    transition_record = _transition_record(proof, station, state)
     confirmed_high = Decimal(state.proven_daily_high_min_f)
     proof_payload = proof.as_dict()
     state_payload = state.to_dict()
+    trigger_epoch_ms = int(state.first_known_at.timestamp() * 1000)
+    trigger_grade = transition_record.grade if transition_record is not None else proof.trigger_grade
+    trigger_raw_group = transition_record.raw_group if transition_record is not None else proof.trigger_raw_group
 
     series = meta["series"]
     series_rules = base.series_rules_before(conn, series, state.first_known_at)
@@ -181,7 +258,16 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 series_rules=series_rules,
                 proven=True,
             )
-            _attach_proof_to_signal(conn, signal_id, proof, state, persisted_evidence_ids)
+            _attach_proof_to_signal(
+                conn,
+                signal_id,
+                proof,
+                state,
+                persisted_evidence_ids,
+                timeline,
+                application_ids,
+                transition_ids,
+            )
 
             if auditor_status != "approved" or not strategy["paper_trade_enabled"]:
                 continue
@@ -194,7 +280,7 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 event_ticker=event["event_ticker"],
                 market_ticker=ticker,
                 trigger_at=state.first_known_at,
-                trigger_epoch_ms=proof.trigger_epoch_ms,
+                trigger_epoch_ms=trigger_epoch_ms,
                 confirmed_high_f=confirmed_high,
                 upper_bound_f=upper,
                 fee_type=str(series_rules["fee_type"]),
@@ -205,18 +291,22 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                     "series_rules_hash": series_rules["rules_hash"],
                     "hard_state_proof": proof_payload,
                     "hard_climate_state": state_payload,
+                    "hard_state_timeline": timeline.to_dict() if timeline is not None else None,
                     "proof_version": hard_state_proof.PROOF_VERSION,
                     "hard_state_model_version": state.state_model_version,
                     "proven_daily_high_min_f": confirmed_high,
                     "upper_bound_f": upper,
                     "region": meta.get("region", station),
                     "climate_trade_date": state.climate_date.isoformat(),
-                    "trigger_evidence_grade": proof.trigger_grade,
-                    "trigger_raw_group": proof.trigger_raw_group,
+                    "trigger_evidence_grade": trigger_grade,
+                    "trigger_raw_group": trigger_raw_group,
+                    "transition_evidence_id": state.transition_evidence_id,
                     "source_weather_ids_at_bound": list(proof.source_weather_ids_at_bound),
                     "raw_source_ids_at_bound": list(proof.raw_source_ids_at_bound),
                     "immutable_provenance_complete": proof.immutable_provenance_complete,
                     "evidence_derivation_ids": list(persisted_evidence_ids),
+                    "hard_state_application_ids": list(application_ids),
+                    "hard_state_transition_ids": list(transition_ids),
                     "station_timezone": timezone_name,
                 },
             ))
