@@ -6,8 +6,9 @@ The original implementation is retained for replay compatibility. Live paper
 execution imports this module instead so DBN spends benchmark cash only when a
 raw-ASOS proof object establishes that the relevant bucket is impossible.
 
-Step 4A adds a domain boundary: raw proof remains attached for provenance, but
-bucket elimination consumes a source-neutral HardClimateState.
+Step 4 adds a domain boundary: raw proof remains attached for provenance, but
+bucket elimination consumes a source-neutral HardClimateState. New source
+captures also persist versioned evidence derivations linked to immutable bytes.
 """
 
 import json
@@ -18,6 +19,7 @@ import psycopg
 
 import hard_state_proof
 import paper_engine as base
+import raw_journal
 import risk_controls
 from hard_information_domain import HardClimateState
 from market_calendar import event_matches_observation
@@ -54,11 +56,36 @@ def _risk_adjusted_mode_budget(
 base.mode_budget = _risk_adjusted_mode_budget
 
 
+def _persist_canonical_evidence(
+    conn: psycopg.Connection[Any],
+    proof: hard_state_proof.HardStateProof,
+    station: str,
+) -> tuple[str, ...]:
+    """Append versioned derivations for proof records with immutable captures.
+
+    Historical rows created before Step 4B have no raw_source_id and therefore
+    remain replayable but are intentionally not back-filled with invented raw
+    provenance.
+    """
+    persisted: list[str] = []
+    for record, evidence in zip(proof.supporting_records, proof.canonical_evidence(station)):
+        if record.raw_source_id is None:
+            continue
+        persisted.append(raw_journal.persist_evidence_derivation(
+            conn,
+            session_id=base.SESSION_ID,
+            evidence=evidence,
+            raw_source_ids=(record.raw_source_id,),
+        ))
+    return tuple(persisted)
+
+
 def _attach_proof_to_signal(
     conn: psycopg.Connection[Any],
     signal_id: int,
     proof: hard_state_proof.HardStateProof,
     state: HardClimateState,
+    persisted_evidence_ids: tuple[str, ...] = (),
 ) -> None:
     """Persist raw provenance and the canonical hard state beside the signal."""
     proof_payload = proof.as_dict()
@@ -74,7 +101,9 @@ def _attach_proof_to_signal(
                  'proven_daily_high_min_f', %s,
                  'climate_trade_date', %s,
                  'trigger_evidence_grade', %s,
-                 'trigger_raw_group', %s
+                 'trigger_raw_group', %s,
+                 'immutable_provenance_complete', %s,
+                 'evidence_derivation_ids', %s::jsonb
                )
          WHERE id=%s
         """,
@@ -87,6 +116,8 @@ def _attach_proof_to_signal(
             state.climate_date.isoformat(),
             proof.trigger_grade,
             proof.trigger_raw_group,
+            proof.immutable_provenance_complete,
+            json.dumps(list(persisted_evidence_ids), separators=(",", ":")),
             signal_id,
         ),
     )
@@ -118,6 +149,7 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
     # Raw syntax ends at the proof adapter. From this point onward, deterministic
     # elimination uses only the canonical source-neutral state.
     state = proof.to_hard_state(station)
+    persisted_evidence_ids = _persist_canonical_evidence(conn, proof, station)
     confirmed_high = Decimal(state.proven_daily_high_min_f)
     proof_payload = proof.as_dict()
     state_payload = state.to_dict()
@@ -146,14 +178,10 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 confirmed_high=confirmed_high,
                 event_rules=event,
                 series_rules=series_rules,
-                # Canonical hard state was derived only from benchmark-eligible
-                # raw-ASOS evidence; decoded collector fields have no authority.
                 proven=True,
             )
-            _attach_proof_to_signal(conn, signal_id, proof, state)
+            _attach_proof_to_signal(conn, signal_id, proof, state, persisted_evidence_ids)
 
-            # Benchmark capital is strictly approved-only. Research/shadow
-            # signals are handled independently by the experiment ledger.
             if auditor_status != "approved" or not strategy["paper_trade_enabled"]:
                 continue
             if not series_rules or not series_rules.get("fee_type") or series_rules.get("fee_multiplier") is None:
@@ -185,6 +213,9 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                     "trigger_evidence_grade": proof.trigger_grade,
                     "trigger_raw_group": proof.trigger_raw_group,
                     "source_weather_ids_at_bound": list(proof.source_weather_ids_at_bound),
+                    "raw_source_ids_at_bound": list(proof.raw_source_ids_at_bound),
+                    "immutable_provenance_complete": proof.immutable_provenance_complete,
+                    "evidence_derivation_ids": list(persisted_evidence_ids),
                     "station_timezone": timezone_name,
                 },
             ))
