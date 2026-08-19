@@ -8,23 +8,40 @@ METAR/SPECI text for one NWS local-standard-time climate day, parses the ASOS
 encoding lattice, and returns the strongest *proven lower bound* on that day's
 maximum temperature.
 
-Step 3 intentionally accepts only current/raw temperature evidence (main/T group)
-and six-hour maximum groups. 24-hour groups/DSM/CLI become first-class evidence
-in Step 4.
+Step 4 adds a source-neutral domain boundary: raw proof records can be adapted
+into canonical SettlementEvidence and HardClimateState objects. Strategy code
+may consume those canonical objects without learning METAR syntax.
 """
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 from typing import Any
 
 import psycopg
 
 from asos_evidence import TemperatureEvidence, evidence_by_kind, parse_temperature_evidence
-from market_calendar import climate_date, climate_day_bounds, six_hour_window_within_climate_day
+from hard_information_domain import (
+    EvidenceTrust,
+    EvidenceType,
+    HardClimateState,
+    IntegrityStatus,
+    SettlementEvidence,
+    SourceClocks,
+)
+from market_calendar import (
+    CLIMATE_CALENDAR_VERSION,
+    climate_date,
+    climate_day_bounds,
+    six_hour_window_within_climate_day,
+)
 
 H1_CURRENT = "H1_CURRENT"
 H2_SIX_HOUR_MAX = "H2_SIX_HOUR_MAX"
+PROOF_VERSION = "raw-asos-lattice-v1"
+PARSER_VERSION = "asos-metar-evidence-v1"
+HARD_STATE_MODEL_VERSION = "hard-climate-state-v1"
 _KIND_PRIORITY = {"main_temp_c": 1, "t_group": 2, "six_hour_max": 3}
 
 
@@ -61,6 +78,67 @@ class ProofRecord:
             "grade": self.grade,
         }
 
+    def evidence_id(self, station_code: str, climate_trade_date: date) -> str:
+        return _stable_id(
+            "evidence",
+            station_code,
+            climate_trade_date.isoformat(),
+            self.weather_id,
+            self.kind,
+            self.raw_group,
+            self.proven_min_f,
+            self.proven_max_f,
+        )
+
+    def to_settlement_evidence(self, station_code: str, climate_trade_date: date) -> SettlementEvidence:
+        """Adapt one accepted raw proof record into the source-neutral evidence contract."""
+        evidence_type = _DOMAIN_EVIDENCE_TYPES[self.kind]
+        integrity = (
+            IntegrityStatus.CANONICAL
+            if len(self.possible_canonical_f) == 1
+            else IntegrityStatus.AMBIGUOUS
+        )
+        return SettlementEvidence(
+            evidence_id=self.evidence_id(station_code, climate_trade_date),
+            evidence_type=evidence_type,
+            station_code=station_code,
+            climate_date=climate_trade_date,
+            source_record_ids=(f"live_weather_journal:{self.weather_id}",),
+            proven_min_f=self.proven_min_f,
+            proven_max_f=self.proven_max_f,
+            integrity_status=integrity,
+            trust=EvidenceTrust.BENCHMARK_ELIGIBLE,
+            clocks=SourceClocks(
+                observed_at=self.observed_at,
+                mercury_received_at=_received_at(self.received_epoch_ms, self.first_seen_at),
+                # Existing AWC journal does not separately preserve these clocks.
+                # Step 4B adds the immutable journal fields; do not fabricate them.
+                mercury_interpreted_at=None,
+                source_published_at=None,
+                first_fetchable_at=None,
+            ),
+            parser_version=PARSER_VERSION,
+            evidence_model_version=PROOF_VERSION,
+            calendar_version=CLIMATE_CALENDAR_VERSION,
+            raw_identifier=self.raw_group,
+            possible_canonical_f=self.possible_canonical_f,
+            metadata={
+                "weather_id": self.weather_id,
+                "source": self.source,
+                "report_type": self.report_type,
+                "grade": self.grade,
+                "encoded_c": str(self.encoded_c),
+                "legacy_first_seen_at": self.first_seen_at.isoformat(),
+            },
+        )
+
+
+_DOMAIN_EVIDENCE_TYPES = {
+    "main_temp_c": EvidenceType.ASOS_MAIN_CURRENT,
+    "t_group": EvidenceType.ASOS_T_GROUP_CURRENT,
+    "six_hour_max": EvidenceType.ASOS_SIX_HOUR_MAX,
+}
+
 
 @dataclass(frozen=True)
 class HardStateProof:
@@ -86,9 +164,59 @@ class HardStateProof:
     def proves_above(self, upper_bound_f: int | Decimal) -> bool:
         return Decimal(self.proven_daily_high_min_f) > Decimal(str(upper_bound_f))
 
+    def canonical_evidence(self, station_code: str) -> tuple[SettlementEvidence, ...]:
+        return tuple(
+            record.to_settlement_evidence(station_code, self.climate_trade_date)
+            for record in self.supporting_records
+        )
+
+    def to_hard_state(self, station_code: str) -> HardClimateState:
+        """Return the source-neutral state strategies/elimination logic should consume."""
+        evidence = self.canonical_evidence(station_code)
+        trigger_id = next(
+            (
+                item.evidence_id
+                for item, record in zip(evidence, self.supporting_records)
+                if record.weather_id == self.trigger_weather_id
+                and record.kind == self.trigger_kind
+                and record.raw_group == self.trigger_raw_group
+            ),
+            _stable_id(
+                "evidence",
+                station_code,
+                self.climate_trade_date.isoformat(),
+                self.trigger_weather_id,
+                self.trigger_kind,
+                self.trigger_raw_group,
+                self.proven_daily_high_min_f,
+            ),
+        )
+        support_ids = tuple(item.evidence_id for item in evidence)
+        if trigger_id not in support_ids:
+            support_ids = (trigger_id, *support_ids)
+        state_id = _stable_id(
+            "hard-state",
+            station_code,
+            self.climate_trade_date.isoformat(),
+            self.proven_daily_high_min_f,
+            trigger_id,
+            HARD_STATE_MODEL_VERSION,
+        )
+        return HardClimateState(
+            state_id=state_id,
+            station_code=station_code,
+            climate_date=self.climate_trade_date,
+            proven_daily_high_min_f=self.proven_daily_high_min_f,
+            first_known_at=self.trigger_at,
+            transition_evidence_id=trigger_id,
+            supporting_evidence_ids=support_ids,
+            state_model_version=HARD_STATE_MODEL_VERSION,
+            calendar_version=CLIMATE_CALENDAR_VERSION,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
-            "proof_version": "raw-asos-lattice-v1",
+            "proof_version": PROOF_VERSION,
             "climate_trade_date": self.climate_trade_date.isoformat(),
             "proven_daily_high_min_f": self.proven_daily_high_min_f,
             "trigger_weather_id": self.trigger_weather_id,
@@ -101,6 +229,18 @@ class HardStateProof:
             "supporting_records": [record.as_dict() for record in self.supporting_records],
             "rejected_row_count": self.rejected_row_count,
         }
+
+
+def _stable_id(prefix: str, *parts: Any) -> str:
+    payload = "|".join(str(part) for part in parts).encode("utf-8")
+    return f"{prefix}:{sha256(payload).hexdigest()[:24]}"
+
+
+def _received_at(received_epoch_ms: int, fallback: datetime) -> datetime:
+    try:
+        return datetime.fromtimestamp(int(received_epoch_ms) / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return fallback
 
 
 def _row_evidence_is_coherent(items: list[TemperatureEvidence]) -> bool:
@@ -140,7 +280,7 @@ def _records_for_row(row: tuple[Any, ...], timezone_name: str) -> tuple[list[Pro
         if not item.hard_state_eligible or item.proven_min_f is None or item.proven_max_f is None:
             continue
         if item.kind == "twenty_four_hour_max":
-            # Step 4 maps the 24-hour/DSM/CLI lifecycle explicitly.
+            # Step 4C maps the 24-hour timing semantics explicitly before trust.
             continue
         if item.kind == "six_hour_max":
             if not six_hour_window_within_climate_day(observed_at, timezone_name):
