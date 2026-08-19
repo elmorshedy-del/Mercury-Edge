@@ -233,3 +233,58 @@ GitHub Actions `Paper Trader CI` run 194:
 ### Behavioral scope
 
 Step 3A is intentionally pure proof construction. DBN/DSN/SBK/HSR still have not been switched to the proof object. That integration is Step 3B and must pass its own tests before Step 4 begins.
+
+---
+
+## Step 3B — Hard-state strategy integration
+
+Status: **PASS — GitHub CI; deterministic strategy behavior now uses the proof object.**
+
+Files changed:
+- `paper_collector/paper_engine_hardened.py`
+- `paper_collector/strategy_runtime_hardened.py`
+- `paper_collector/Dockerfile`
+- `paper_collector/test_hard_state_integration.py`
+
+### DBN behavior
+
+The hardened DBN path now calls `hard_state_proof.proof_for_weather()` and returns without a signal unless the current weather row is the causal trigger that raises the day's proven lower bound. Bucket death is evaluated by `proof.proves_above(market_upper_bound)`.
+
+The collector's decoded `temperature_f`/`max_temperature_f` cannot raise or lower this deterministic bound. DBN signal/order evidence retains the complete raw proof payload, proof version, LST climate date, trigger grade, raw group, and source weather IDs.
+
+### DSN/SBK/HSR behavior
+
+`strategy_runtime_hardened.py` now has two explicitly separate weather paths:
+
+- **hard core** (`DSN`, `SBK`, `HSR`): constructed only from a newly raised `HardStateProof` and receives `proven=True` from that proof;
+- **research** (`WTY`, `RMO`, `PRV`, `LVP`, `HMF`): preserves the legacy weather context for now and is labelled `research_legacy_weather_semantics` where relevant.
+
+This means a probabilistic/decoded weather value cannot leak into the hard-core bucket-death set.
+
+Benchmark isolation remains unchanged: `paper_trade_enabled=true` is insufficient by itself. A bundle must also have `confidence_gate=approved_only` and `auditor_status=approved`. Shadow-only HSR/DSN/SBK therefore cannot spend benchmark cash.
+
+### Required regression cases
+
+- decoded 87.8°F + raw proof lower bound 87°F => upper-87 bucket remains alive;
+- raw proof lower bound 88°F => upper-87 bucket is dead and DBN candidate uses exactly 88°F;
+- repeated same proof bound => no second DBN trigger;
+- missing/off-lattice raw proof => no DBN hard-state trigger;
+- 00:30 EDT maps only to the previous LST climate-date event;
+- DBN signal audit stores the raw proof payload;
+- hard strategy weather view overrides a low decoded current value with the proof lower bound;
+- HSR is constructed from the proof and carries the proof provenance;
+- a six-hour hidden maximum can kill a bucket while current temperature is lower;
+- no hard proof => no DSN/SBK/HSR bundle;
+- shadow-only configuration cannot spend benchmark capital.
+
+### Verification
+
+GitHub Actions `Paper Trader CI` run 206:
+- Python compile including hardened DBN/runtime: PASS
+- existing strategy tests + Steps 1/2/3A + Step 3B integration tests: PASS
+- collector Docker build with `asos_evidence.py` and `hard_state_proof.py`: PASS
+- Node checks: PASS
+
+### Behavioral scope
+
+Step 3 is now complete for the deterministic hard-state core. The 24-hour group/DSM/CLI lifecycle is still deliberately excluded from `HardStateProof`; adding and grading those evidence types is Step 4.
