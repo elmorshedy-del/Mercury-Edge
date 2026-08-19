@@ -22,8 +22,17 @@ class FakeConnection:
         return self.rows
 
 
-def row(weather_id, observed_at, first_seen_at, raw, source="NOAA_AWC", report_type="METAR"):
-    return (weather_id, source, report_type, observed_at, first_seen_at, int(first_seen_at.timestamp() * 1000), raw)
+def row(weather_id, observed_at, first_seen_at, raw, source="NOAA_AWC", report_type="METAR", raw_source_id=None):
+    return (
+        weather_id,
+        raw_source_id,
+        source,
+        report_type,
+        observed_at,
+        first_seen_at,
+        int(first_seen_at.timestamp() * 1000),
+        raw,
+    )
 
 
 def weather(weather_id, observed_at, first_seen_at, station="KPHL"):
@@ -154,6 +163,7 @@ class HardStateProofTests(unittest.TestCase):
         self.assertTrue(t_item.benchmark_eligible)
         self.assertEqual(t_item.source_record_ids, ("live_weather_journal:7",))
         self.assertIsNone(t_item.clocks.first_fetchable_at)  # never fabricate a clock we do not store
+        self.assertFalse(proof.immutable_provenance_complete)
 
         state = proof.to_hard_state("KPHL")
         self.assertEqual(state.station_code, "KPHL")
@@ -163,6 +173,23 @@ class HardStateProofTests(unittest.TestCase):
         self.assertEqual(state.calendar_version, CLIMATE_CALENDAR_VERSION)
         self.assertIn(state.transition_evidence_id, state.supporting_evidence_ids)
         json.dumps(state.to_dict(), sort_keys=True)
+
+    def test_new_capture_proof_links_to_immutable_raw_source(self) -> None:
+        obs = datetime(2026, 8, 18, 18, 54, tzinfo=UTC)
+        seen = datetime(2026, 8, 18, 18, 55, tzinfo=UTC)
+        conn = FakeConnection([row(
+            7, obs, seen,
+            "KPHL 181854Z 22008KT 10SM CLR 31/20 A2992 RMK AO2 T03110200",
+            raw_source_id=42,
+        )])
+        proof = proof_for_weather(conn, session_id="s", weather=weather(7, obs, seen), timezone_name="America/New_York")
+        assert proof is not None
+        self.assertTrue(proof.immutable_provenance_complete)
+        self.assertEqual(proof.raw_source_ids_at_bound, (42,))
+        evidence = proof.canonical_evidence("KPHL")
+        self.assertTrue(evidence)
+        self.assertTrue(all(item.source_record_ids == ("raw_source_journal:42",) for item in evidence))
+        self.assertTrue(all(item.metadata["immutable_raw_provenance"] for item in evidence))
 
     def test_lossy_main_field_is_canonical_ambiguous_evidence_not_a_guessed_rounding(self) -> None:
         obs = datetime(2026, 8, 18, 18, 54, tzinfo=UTC)
