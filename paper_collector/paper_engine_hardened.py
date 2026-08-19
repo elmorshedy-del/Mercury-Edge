@@ -2,19 +2,21 @@ from __future__ import annotations
 
 """Fail-closed wrapper around the original DBN paper engine.
 
-The original implementation is retained for replay compatibility.  Live paper
-execution imports this module instead so the benchmark path gets stricter
-calendar, same-day-high, and drawdown semantics without rewriting the proven
-fill/fee code.
+The original implementation is retained for replay compatibility. Live paper
+execution imports this module instead so DBN spends benchmark cash only when a
+raw-ASOS proof object establishes that the relevant bucket is impossible.
 """
 
+import json
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 
+import hard_state_proof
 import paper_engine as base
 import risk_controls
-from market_calendar import confirmed_same_day_high, event_matches_observation
+from market_calendar import event_matches_observation
 from stations import STATIONS
 
 # Re-export the primitives used by unified_engine / strategy runtime.
@@ -48,6 +50,37 @@ def _risk_adjusted_mode_budget(
 base.mode_budget = _risk_adjusted_mode_budget
 
 
+def _attach_proof_to_signal(
+    conn: psycopg.Connection[Any],
+    signal_id: int,
+    proof: hard_state_proof.HardStateProof,
+) -> None:
+    """Persist the exact raw-evidence proof alongside the DBN signal audit record."""
+    payload = proof.as_dict()
+    conn.execute(
+        """
+        UPDATE paper_signals
+           SET evidence = evidence || jsonb_build_object(
+                 'hard_state_proof', %s::jsonb,
+                 'proof_version', 'raw-asos-lattice-v1',
+                 'proven_daily_high_min_f', %s,
+                 'climate_trade_date', %s,
+                 'trigger_evidence_grade', %s,
+                 'trigger_raw_group', %s
+               )
+         WHERE id=%s
+        """,
+        (
+            json.dumps(payload, separators=(",", ":"), default=base.json_default),
+            proof.proven_daily_high_min_f,
+            proof.climate_trade_date.isoformat(),
+            proof.trigger_grade,
+            proof.trigger_raw_group,
+            signal_id,
+        ),
+    )
+
+
 def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> int:
     station = weather["station_code"]
     meta = STATIONS.get(station)
@@ -62,24 +95,26 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
         base.audit_error(conn, "MISSING_STATION_TIMEZONE", {"weather_id": weather["id"]}, station)
         return 0
 
-    high = confirmed_same_day_high(
+    proof = hard_state_proof.proof_for_weather(
         conn,
         session_id=base.SESSION_ID,
-        station_code=station,
-        observed_at=weather["observed_at"],
-        first_seen_at=weather["first_seen_at"],
+        weather=weather,
         timezone_name=timezone_name,
     )
-    if high is None:
+    if proof is None or not proof.is_new_transition(weather["id"]):
         return 0
-    confirmed_high = high.value_f
+
+    # This is deliberately an integer lower bound from the raw-ASOS lattice.
+    # Decoded temperature_f/max_temperature_f values in the collector row have
+    # no authority over deterministic bucket elimination.
+    confirmed_high = Decimal(proof.proven_daily_high_min_f)
+    proof_payload = proof.as_dict()
 
     series = meta["series"]
-    proven = base.compatibility_is_proven(conn, weather)
-    series_rules = base.series_rules_before(conn, series, weather["first_seen_at"])
+    series_rules = base.series_rules_before(conn, series, proof.trigger_at)
     event_rules = [
         event
-        for event in base.event_rule_candidates(conn, series, weather["first_seen_at"])
+        for event in base.event_rule_candidates(conn, series, proof.trigger_at)
         if event_matches_observation(event["event_ticker"], weather["observed_at"], timezone_name)
     ]
 
@@ -88,7 +123,7 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
         for market in event["markets"]:
             upper = base.market_upper_bound(market)
             ticker = str(market.get("ticker") or "")
-            if not ticker or upper is None or confirmed_high <= upper:
+            if not ticker or upper is None or not proof.proves_above(upper):
                 continue
             signal_id, auditor_status = base.insert_signal(
                 conn,
@@ -99,9 +134,13 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 confirmed_high=confirmed_high,
                 event_rules=event,
                 series_rules=series_rules,
-                proven=proven,
+                # Raw-ASOS proof replaces the old generic decoded-weather
+                # compatibility gate for hard-state classification.
+                proven=True,
             )
-            # Benchmark capital is strictly approved-only.  Research/shadow
+            _attach_proof_to_signal(conn, signal_id, proof)
+
+            # Benchmark capital is strictly approved-only. Research/shadow
             # signals are handled independently by the experiment ledger.
             if auditor_status != "approved" or not strategy["paper_trade_enabled"]:
                 continue
@@ -113,8 +152,8 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                 region=meta.get("region", station),
                 event_ticker=event["event_ticker"],
                 market_ticker=ticker,
-                trigger_at=weather["first_seen_at"],
-                trigger_epoch_ms=weather["received_epoch_ms"],
+                trigger_at=proof.trigger_at,
+                trigger_epoch_ms=proof.trigger_epoch_ms,
                 confirmed_high_f=confirmed_high,
                 upper_bound_f=upper,
                 fee_type=str(series_rules["fee_type"]),
@@ -123,13 +162,15 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
                     "weather_event_id": weather["id"],
                     "event_rules_hash": event["rules_hash"],
                     "series_rules_hash": series_rules["rules_hash"],
-                    "compatibility_rule": weather["compatibility_rule"],
-                    "confirmed_high_f": confirmed_high,
+                    "hard_state_proof": proof_payload,
+                    "proof_version": "raw-asos-lattice-v1",
+                    "proven_daily_high_min_f": confirmed_high,
                     "upper_bound_f": upper,
                     "region": meta.get("region", station),
-                    "local_trade_date": high.local_trade_date.isoformat(),
-                    "same_day_high_weather_ids": list(high.evidence_weather_ids),
-                    "awc_six_hour_max_weather_ids": list(high.used_awc_six_hour_max_ids),
+                    "climate_trade_date": proof.climate_trade_date.isoformat(),
+                    "trigger_evidence_grade": proof.trigger_grade,
+                    "trigger_raw_group": proof.trigger_raw_group,
+                    "source_weather_ids_at_bound": list(proof.source_weather_ids_at_bound),
                     "station_timezone": timezone_name,
                 },
             ))
