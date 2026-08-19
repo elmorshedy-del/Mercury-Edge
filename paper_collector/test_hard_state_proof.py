@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
+import json
 import unittest
 
+from hard_information_domain import EvidenceTrust, EvidenceType, IntegrityStatus
 from hard_state_proof import H1_CURRENT, H2_SIX_HOUR_MAX, proof_for_weather
+from market_calendar import CLIMATE_CALENDAR_VERSION
 
 UTC = timezone.utc
 
@@ -134,6 +137,59 @@ class HardStateProofTests(unittest.TestCase):
         proof_for_weather(conn, session_id="s", weather=weather(7, obs, seen), timezone_name="America/New_York")
         self.assertEqual(conn.params[2], datetime(2026, 8, 18, 5, 0, tzinfo=UTC))
         self.assertEqual(conn.params[3], datetime(2026, 8, 19, 5, 0, tzinfo=UTC))
+
+    def test_proof_adapts_to_canonical_evidence_and_hard_state(self) -> None:
+        obs = datetime(2026, 8, 18, 18, 54, tzinfo=UTC)
+        seen = datetime(2026, 8, 18, 18, 55, tzinfo=UTC)
+        conn = FakeConnection([row(7, obs, seen, "KPHL 181854Z 22008KT 10SM CLR 31/20 A2992 RMK AO2 T03110200")])
+        proof = proof_for_weather(conn, session_id="s", weather=weather(7, obs, seen), timezone_name="America/New_York")
+        assert proof is not None
+
+        evidence = proof.canonical_evidence("KPHL")
+        self.assertGreaterEqual(len(evidence), 1)
+        t_item = next(item for item in evidence if item.evidence_type is EvidenceType.ASOS_T_GROUP_CURRENT)
+        self.assertEqual(t_item.proven_min_f, 88)
+        self.assertEqual(t_item.integrity_status, IntegrityStatus.CANONICAL)
+        self.assertEqual(t_item.trust, EvidenceTrust.BENCHMARK_ELIGIBLE)
+        self.assertTrue(t_item.benchmark_eligible)
+        self.assertEqual(t_item.source_record_ids, ("live_weather_journal:7",))
+        self.assertIsNone(t_item.clocks.first_fetchable_at)  # never fabricate a clock we do not store
+
+        state = proof.to_hard_state("KPHL")
+        self.assertEqual(state.station_code, "KPHL")
+        self.assertEqual(state.climate_date.isoformat(), "2026-08-18")
+        self.assertEqual(state.proven_daily_high_min_f, 88)
+        self.assertTrue(state.proves_above(87))
+        self.assertEqual(state.calendar_version, CLIMATE_CALENDAR_VERSION)
+        self.assertIn(state.transition_evidence_id, state.supporting_evidence_ids)
+        json.dumps(state.to_dict(), sort_keys=True)
+
+    def test_lossy_main_field_is_canonical_ambiguous_evidence_not_a_guessed_rounding(self) -> None:
+        obs = datetime(2026, 8, 18, 18, 54, tzinfo=UTC)
+        seen = datetime(2026, 8, 18, 18, 55, tzinfo=UTC)
+        conn = FakeConnection([row(9, obs, seen, "KPHL 181854Z 22008KT 10SM CLR 31/20 A2992 RMK AO2")])
+        proof = proof_for_weather(conn, session_id="s", weather=weather(9, obs, seen), timezone_name="America/New_York")
+        assert proof is not None
+        evidence = proof.canonical_evidence("KPHL")
+        self.assertEqual(len(evidence), 1)
+        item = evidence[0]
+        self.assertEqual(item.evidence_type, EvidenceType.ASOS_MAIN_CURRENT)
+        self.assertEqual(item.integrity_status, IntegrityStatus.AMBIGUOUS)
+        self.assertEqual(item.possible_canonical_f, (87, 88))
+        self.assertEqual(item.proven_min_f, 87)
+        self.assertTrue(item.benchmark_eligible)
+
+    def test_six_hour_hidden_max_adapts_as_distinct_evidence_type(self) -> None:
+        obs = datetime(2026, 8, 16, 23, 53, tzinfo=UTC)
+        seen = datetime(2026, 8, 16, 23, 54, tzinfo=UTC)
+        conn = FakeConnection([row(11, obs, seen, "KLAX 162353Z 25015KT 10SM CLR 23/18 A2995 RMK AO2 10250 T02330178")])
+        proof = proof_for_weather(conn, session_id="s", weather=weather(11, obs, seen, "KLAX"), timezone_name="America/Los_Angeles")
+        assert proof is not None
+        evidence = proof.canonical_evidence("KLAX")
+        six = next(item for item in evidence if item.evidence_type is EvidenceType.ASOS_SIX_HOUR_MAX)
+        self.assertEqual(six.proven_min_f, 77)
+        self.assertEqual(six.raw_identifier, "10250")
+        self.assertTrue(six.benchmark_eligible)
 
 
 if __name__ == "__main__":
