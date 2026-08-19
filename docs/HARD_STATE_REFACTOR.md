@@ -165,3 +165,71 @@ GitHub Actions `Paper Trader CI` run 186:
 ### Behavioral scope
 
 Step 2 changes only date/window semantics in the hardened branch. It does **not** yet make decoded weather values settlement-grade proof. The legacy `temperature_f`/`max_temperature_f` aggregation remains in place until Step 3 replaces it with the tested evidence objects.
+
+---
+
+## Step 3A — Causal raw-ASOS daily proof aggregator
+
+Status: **PASS — local tests + GitHub CI; still isolated from execution.**
+
+Files:
+- `paper_collector/hard_state_proof.py`
+- `paper_collector/test_hard_state_proof.py`
+
+### Design
+
+`HardStateProof` is the deterministic daily-high lower-bound object consumed by the next integration step. It queries only causally available `NOAA_AWC` rows with raw METAR/SPECI text inside the same LST climate day. It ignores the collector's decoded `temperature_f` and `max_temperature_f` fields.
+
+Accepted proof inputs in Step 3A:
+- main METAR temperature field, interpreted only as its inverse whole-F lattice set;
+- precise T group;
+- six-hour maximum group, only when the complete six-hour interval is inside the same LST climate day.
+
+Deferred to Step 4:
+- 24-hour max group;
+- DSM;
+- final CLI.
+
+Fail-closed row checks:
+- any off-lattice temperature evidence rejects the whole raw report for hard-state use;
+- a precise T group inconsistent with the main temperature field rejects the row;
+- a six-hour maximum below the precise current temperature in the same report rejects the row.
+
+The daily proof is the maximum of every accepted record's `proven_min_f`. The trigger is the **first causal report that establishes a new bound**; later repeats of the same bound do not generate a second transition.
+
+Grades introduced:
+- `H1_CURRENT` — current main/T evidence;
+- `H2_SIX_HOUR_MAX` — valid same-climate-day six-hour maximum.
+
+### Required regression cases
+
+- `T0311` => daily lower bound 88°F, kills upper bound 87°F.
+- main `31°C` => lower bound 87°F, does not kill upper 87°F.
+- main `32°C` => lower bound 89°F.
+- `T0310` off-lattice => no proof from that row.
+- contradictory main/T fields => no proof from that row.
+- KLAX current temperature below the hidden six-hour max => six-hour group raises the daily lower bound.
+- cross-midnight six-hour max => ignored; current evidence can still contribute.
+- repeated same bound => no new transition.
+- later higher bound => new transition.
+- causal query uses the LST climate-day bounds.
+
+### Verification
+
+Local command:
+
+```bash
+python -m unittest -v test_hard_state_proof.py
+```
+
+Result: **10 passed, 0 failed.**
+
+GitHub Actions `Paper Trader CI` run 194:
+- collector compile: PASS
+- existing tests + Steps 1/2/3A tests: PASS
+- collector Docker build: PASS
+- Node checks: PASS
+
+### Behavioral scope
+
+Step 3A is intentionally pure proof construction. DBN/DSN/SBK/HSR still have not been switched to the proof object. That integration is Step 3B and must pass its own tests before Step 4 begins.
