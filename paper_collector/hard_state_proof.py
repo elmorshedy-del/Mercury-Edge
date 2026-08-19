@@ -79,6 +79,7 @@ class ProofRecord:
         }
 
     def evidence_id(self, station_code: str, climate_trade_date: date) -> str:
+        """Version-sensitive identity for one concrete evidence derivation."""
         return _stable_id(
             "evidence",
             station_code,
@@ -88,6 +89,9 @@ class ProofRecord:
             self.raw_group,
             self.proven_min_f,
             self.proven_max_f,
+            PARSER_VERSION,
+            PROOF_VERSION,
+            CLIMATE_CALENDAR_VERSION,
         )
 
     def to_settlement_evidence(self, station_code: str, climate_trade_date: date) -> SettlementEvidence:
@@ -189,6 +193,9 @@ class HardStateProof:
                 self.trigger_kind,
                 self.trigger_raw_group,
                 self.proven_daily_high_min_f,
+                PARSER_VERSION,
+                PROOF_VERSION,
+                CLIMATE_CALENDAR_VERSION,
             ),
         )
         support_ids = tuple(item.evidence_id for item in evidence)
