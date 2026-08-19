@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+CLIMATE_CALENDAR_VERSION = "lst-climate-calendar-v1"
+
 _EVENT_DATE_RE = re.compile(r"-(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<day>\d{2})(?:$|-)")
 _MONTHS = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
@@ -118,16 +120,7 @@ def six_hour_window_within_climate_day(observed_at: datetime, timezone_name: str
     day = climate_date(end, timezone_name)
     start_utc, end_utc = climate_day_bounds(day, timezone_name)
     window_start = end - SIX_HOURS
-    return start_utc <= window_start and end < end_utc
-
-
-def _d(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
+    return window_start >= start_utc and end < end_utc
 
 
 def confirmed_same_day_high(
@@ -139,52 +132,40 @@ def confirmed_same_day_high(
     first_seen_at: datetime,
     timezone_name: str,
 ) -> ConfirmedHigh | None:
-    """Return the highest value causally known for the station's LST climate day.
+    """Legacy decoded aggregation retained for research-only callers.
 
-    Step 2 changes only calendar semantics. Precise evidence/provenance filtering
-    is deliberately deferred to Step 3.
-
-    Every ordinary temperature print received by ``first_seen_at`` is currently
-    eligible under the legacy model. AWC ``maxT`` is a six-hour maximum; it is
-    accepted only when its full six-hour lookback starts on or after 00:00 LST.
+    Deterministic hard-state trading must use ``hard_state_proof`` instead.
     """
     day = climate_date(observed_at, timezone_name)
     start_utc, end_utc = climate_day_bounds(day, timezone_name)
     rows = conn.execute(
         """
-        SELECT id,source,observed_at,temperature_f,max_temperature_f
+        SELECT id,source,report_type,observed_at,temperature_f,max_temperature_f
           FROM live_weather_journal
          WHERE session_id=%s
            AND station_code=%s
-           AND first_seen_at<=%s
            AND observed_at>=%s
            AND observed_at<%s
-           AND (temperature_f IS NOT NULL OR max_temperature_f IS NOT NULL)
+           AND first_seen_at<=%s
          ORDER BY first_seen_at ASC,id ASC
         """,
-        (session_id, station_code, first_seen_at, start_utc, end_utc),
+        (session_id, station_code, start_utc, end_utc, first_seen_at),
     ).fetchall()
-    if not rows:
-        return None
-
     values: list[Decimal] = []
     evidence_ids: list[int] = []
     six_hour_ids: list[int] = []
-
-    for row_id, source, row_observed_at, temperature_f, max_temperature_f in rows:
-        temp = _d(temperature_f)
-        if temp is not None:
-            values.append(temp)
-            evidence_ids.append(int(row_id))
-
-        max_temp = _d(max_temperature_f)
-        if max_temp is None or str(source) != "NOAA_AWC":
+    for weather_id, source, report_type, row_observed, temperature_f, max_temperature_f in rows:
+        if temperature_f is not None:
+            values.append(Decimal(str(temperature_f)))
+            evidence_ids.append(int(weather_id))
+        if max_temperature_f is None:
             continue
-        if six_hour_window_within_climate_day(aware(row_observed_at), timezone_name):
-            values.append(max_temp)
-            evidence_ids.append(int(row_id))
-            six_hour_ids.append(int(row_id))
-
+        if str(source) == "NOAA_AWC" and str(report_type).upper() in {"METAR", "SPECI"}:
+            if not six_hour_window_within_climate_day(row_observed, timezone_name):
+                continue
+            six_hour_ids.append(int(weather_id))
+        values.append(Decimal(str(max_temperature_f)))
+        evidence_ids.append(int(weather_id))
     if not values:
         return None
     return ConfirmedHigh(
