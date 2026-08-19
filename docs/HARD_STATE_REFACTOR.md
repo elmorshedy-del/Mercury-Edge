@@ -1,6 +1,7 @@
 # Mercury hard-state refactor log
 
 Branch: `paper-rigour-v2`
+Draft PR: `#5` — do not merge/deploy until the final exact-build replay passes.
 
 Goal: rebuild the deterministic weather edge around settlement-compatible evidence that eliminates outcomes, with every behavioral change isolated, tested, and documented before the next step.
 
@@ -41,7 +42,7 @@ References:
 
 ## Step 1 — ASOS evidence lattice/parser
 
-Status: **PASS — implemented and unit-tested; not yet wired into trading behavior.**
+Status: **PASS — local tests + GitHub CI; not yet wired into trading behavior.**
 
 Files:
 - `paper_collector/asos_evidence.py`
@@ -86,16 +87,81 @@ not as a Celsius round-trip.
 - KLAX 24-hour group `402500194` -> max exact 77°F
 - negative-temperature encoding remains correct
 
-### Test command
+### Verification
 
-From `paper_collector/`:
+Local command:
 
 ```bash
 python -m unittest -v test_asos_evidence.py
 ```
 
-Local verification before commit: **11 tests, 11 passed, 0 failed.**
+Result: **11 passed, 0 failed.**
+
+GitHub Actions `Paper Trader CI` run 180:
+- collector compile: PASS
+- existing strategy tests + ASOS evidence tests: PASS
+- collector Docker build: PASS
+- Node checks: PASS
 
 ### Explicit non-changes
 
-Step 1 does **not** alter `weather_collector.py`, `market_calendar.py`, DBN/HSR execution, portfolio state, or Railway. This preserves a clean causal boundary: the evidence primitive is proved first; integration occurs only after Step 1 is accepted.
+Step 1 did **not** alter `weather_collector.py`, `market_calendar.py`, DBN/HSR execution, portfolio state, or Railway. The evidence primitive was proved first; integration is deferred to Step 3.
+
+---
+
+## Step 2 — Local-standard-time climate calendar
+
+Status: **PASS — local tests + GitHub CI.**
+
+Files:
+- `paper_collector/market_calendar.py`
+- `paper_collector/test_market_calendar.py`
+
+### Design
+
+Settlement-day logic now distinguishes ordinary civil local time from the fixed **local standard time** clock used for NWS/ASOS climate days.
+
+New primitives:
+- `standard_utc_offset(timezone_name, year)`
+- `local_standard_time(value, timezone_name)`
+- `climate_date(value, timezone_name)`
+- `climate_day_bounds(day, timezone_name)`
+- `six_hour_window_within_climate_day(observed_at, timezone_name)`
+
+`event_matches_observation()` now compares a Kalshi event date with the observation's **climate date**, not its civil date.
+
+`confirmed_same_day_high()` now queries 00:00–24:00 LST and only accepts an AWC six-hour maximum when the full six-hour lookback is inside that same climate day. Step 2 deliberately leaves evidence-source filtering unchanged; that is Step 3.
+
+### Required regression cases
+
+- New York Aug 19 00:30 EDT = Aug 18 climate date.
+- New York Aug 19 01:00 EDT = Aug 19 climate date.
+- Los Angeles Aug 17 00:30 PDT = Aug 16 climate date.
+- Phoenix has no DST displacement; its climate boundary remains civil midnight.
+- Standard offsets: ET -5, CT -6, MT/AZ -7, PT -8.
+- August New York climate day = 05:00Z to 05:00Z.
+- August Los Angeles climate day = 08:00Z to 08:00Z.
+- Winter and summer use the same standard-time UTC boundary.
+- KLAX 15:53 LST six-hour max window is valid inside the climate day.
+- KLAX 03:53 LST six-hour max window is rejected because it crosses climate midnight.
+- `confirmed_same_day_high()` uses LST query bounds and excludes a cross-midnight `maxT`.
+
+### Verification
+
+Local command:
+
+```bash
+python -m unittest -v test_market_calendar.py
+```
+
+Result: **10 passed, 0 failed.**
+
+GitHub Actions `Paper Trader CI` run 186:
+- collector compile: PASS
+- existing strategy tests + Step 1 + Step 2 tests: PASS
+- collector Docker build: PASS
+- Node checks: PASS
+
+### Behavioral scope
+
+Step 2 changes only date/window semantics in the hardened branch. It does **not** yet make decoded weather values settlement-grade proof. The legacy `temperature_f`/`max_temperature_f` aggregation remains in place until Step 3 replaces it with the tested evidence objects.
