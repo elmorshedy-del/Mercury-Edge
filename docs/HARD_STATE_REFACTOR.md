@@ -31,7 +31,7 @@ References:
 1. **ASOS evidence lattice/parser** — pure raw-METAR proof objects; no trading integration.
 2. **LST climate-day calendar** — replace civil-midnight semantics and correctly map max-group windows.
 3. **Hard-state proof integration** — DBN/DSN/SBK/HSR consume proof objects, never generic C→F decoded values.
-4. **First-class hidden-max events** — distinguish current print, 6-hour max, 24-hour max/DSM, and final CLI evidence.
+4. **First-class hidden-max events / canonical information architecture** — immutable raw evidence, source-neutral evidence/state, current/T/six-hour channels, monotonic state; 24-hour/DSM/CLI admitted only with explicit lifecycle semantics.
 5. **Predictive vs confirmed separation** — hidden-max prediction stays research-only; confirmed impossible buckets form the deterministic core.
 6. **Focused reaction/capacity research** — replace random Cartesian parameter grids with reaction-time and executable-capacity curves.
 7. **Hard-state allocator** — HSR chooses among equivalent certain-payoff constructions using fee-adjusted executable dollar return.
@@ -287,4 +287,178 @@ GitHub Actions `Paper Trader CI` run 206:
 
 ### Behavioral scope
 
-Step 3 is now complete for the deterministic hard-state core. The 24-hour group/DSM/CLI lifecycle is still deliberately excluded from `HardStateProof`; adding and grading those evidence types is Step 4.
+Step 3 is complete for the deterministic hard-state core. The richer immutable evidence/state lifecycle is implemented in Step 4A-D below.
+
+---
+
+## Step 4A — Canonical source-neutral information contracts
+
+Status: **PASS — covered by the full Step 4D regression run.**
+
+Files:
+- `paper_collector/hard_information_domain.py`
+- `paper_collector/test_hard_information_domain.py`
+- adapters in `paper_collector/hard_state_proof.py`
+
+### Design
+
+The deterministic pipeline now has explicit contracts for:
+- immutable raw-source references;
+- normalized observations;
+- settlement evidence;
+- monotonic hard climate state;
+- bucket-elimination facts;
+- executable market state;
+- settlement/validation truth.
+
+Weather parsers are upstream adapters. Strategy/elimination code no longer needs METAR syntax. Evidence trust is explicit (`benchmark_eligible`, `validation_only`, `research_only`, `rejected`) and fail-closed integrity states prevent unsupported evidence from becoming benchmark authority by accident.
+
+The interface already has evidence types for current ASOS, T-group, six-hour max, isolated 24-hour max, future MADIS 1-minute/reconstructed five-minute evidence, DSM, CLI, and Kalshi settlement truth. Defining a type does not grant it benchmark trust.
+
+### Verification
+
+The domain serialization, trust boundary and existing proof behavior are exercised in the current full suite. No deployment occurred.
+
+---
+
+## Step 4B — Immutable raw journal + replaceable derivations
+
+Status: **PASS — raw capture, derivation versioning, database immutability and migration regression verified.**
+
+Files:
+- `sql/013_immutable_hard_information_journal.sql`
+- `paper_collector/raw_journal.py`
+- `paper_collector/weather_collector.py`
+- `paper_collector/test_raw_journal.py`
+- `paper_collector/test_weather_collector_capture.py`
+- `paper_collector/test_evidence_versioning.py`
+- `sql/tests/013_immutable_hard_information_journal_test.sql`
+
+### Design
+
+AWC network response bytes are journaled before parsed weather rows are trusted. Raw captures retain exact bytes, SHA-256, receipt clocks and every source clock actually supplied/measurable. Parsed weather rows can reference the immutable capture through `raw_source_id`.
+
+Evidence is persisted separately in `evidence_derivations`; each derivation carries parser/evidence/calendar versions and links to every immutable raw input through `evidence_source_links`. A changed parser/model produces a new versioned derivation instead of changing the raw record.
+
+Database triggers reject UPDATE/DELETE on raw captures, evidence derivations and evidence-source links. Application retries are idempotent by stable identities and hash verification; identity/hash disagreements fail closed.
+
+### Verification
+
+By Step 4D run 298, all raw-journal, weather-capture, evidence-versioning and real Postgres immutability tests pass. No old raw record is back-filled with invented provenance.
+
+---
+
+## Step 4C — Live ASOS evidence channels
+
+Status: **PASS for current/T/six-hour benchmark core; 24-hour channel remains deliberately non-trading until exact midnight-LST association is proven.**
+
+Files:
+- `paper_collector/asos_evidence.py`
+- `paper_collector/hard_state_proof.py`
+- `paper_collector/test_live_asos_channels.py`
+- existing ASOS/calendar/proof tests
+
+### Design
+
+Current main-C, precise T-group, and valid same-climate-day six-hour maximum remain separate evidence items. A single routine report may therefore preserve both a lower current temperature and a higher hidden six-hour maximum without information loss.
+
+`HardStateProof.all_records`/`evidence_records` retain every accepted causal item; `supporting_records` identifies only evidence at the current hard bound. The 24-hour group is parsed but never admitted into benchmark hard state by the current adapter. Ambiguous midnight-LST semantics therefore fail closed rather than being guessed.
+
+### Key regressions
+
+- main 31°C does not prove 88°F;
+- main 32°C uses the canonical inverse lattice;
+- T0311 = 88°F;
+- T0306 = 87°F;
+- T0310 fails closed;
+- current below six-hour max preserves both facts and raises the hard bound;
+- cross-climate-midnight six-hour max is rejected;
+- equal/lower evidence cannot create a second bound transition;
+- 24-hour max remains isolated/non-trading.
+
+### Verification
+
+All cases pass in run 298 along with the Step 4D accumulator suite.
+
+---
+
+## Step 4D — Canonical monotonic hard-state accumulator
+
+Status: **PASS — GitHub Actions run 298; 92 Python tests passed, plus Node, Docker and Postgres migration/immutability checks.**
+
+Primary files:
+- `paper_collector/hard_state_accumulator.py`
+- `paper_collector/hard_state_journal.py`
+- `paper_collector/test_hard_state_accumulator.py`
+- `paper_collector/test_hard_state_accumulator_integration.py`
+- `sql/016_hard_state_timeline.sql`
+- `sql/tests/016_hard_state_timeline_test.sql`
+- `paper_collector/paper_engine_hardened.py`
+- `paper_collector/strategy_runtime_hardened.py`
+- `.github/workflows/paper-ci.yml`
+- `paper_collector/Dockerfile`
+
+### Canonical accumulator
+
+`accumulate_hard_state()` consumes only canonical `SettlementEvidence`. It is unaware of METAR, MADIS, Celsius and Kalshi strike syntax. Evidence must match the exact station, LST climate date and calendar version and must be explicitly benchmark-eligible before it may change state.
+
+State is monotonic. Once 88°F is proven for a climate day, a later 87°F or 74°F observation is retained as corroborating history but cannot reduce the bound.
+
+Causal order is based on the time Mercury actually had an interpreted usable fact: `mercury_interpreted_at` when present, otherwise `mercury_received_at`. Physical observation time, source publication and first-fetchability remain distinct clocks and can never make a live/replay decision occur before Mercury receipt.
+
+### Atomic knowledge batches
+
+A crucial invariant was added during 4D: facts becoming usable at the exact same Mercury timestamp are one atomic knowledge batch. A routine METAR containing a current 74°F fact and a six-hour hidden max of 77°F therefore creates **one** transition to 77°F, not fictional intermediate 74°F then 77°F trading windows inside the same response.
+
+Within one batch, the strongest valid lower bound is authoritative. Equal strongest evidence is deterministically tie-broken by evidence ID while the other item is preserved as same-batch corroboration.
+
+### Append-only timeline
+
+`hard_state_applications` records every versioned evidence application as `transition`, `corroboration`, `rejected`, or `duplicate`, with reason, first usable time, prior/resulting bound, evidence type and version hashes.
+
+`hard_state_transitions` records only actual bound increases with the first-known time, transition evidence ID, supporting evidence IDs and model/calendar versions.
+
+Both tables are append-only and protected by the database immutability trigger. Recomputing identical state is idempotent; a stable identity yielding different bytes fails closed as non-determinism/versioning failure.
+
+Later corroboration can therefore never rewrite the first-known transition. QC/settlement disagreement handling will consume this immutable history in Step 4H rather than mutate it.
+
+### Hard-core integration
+
+DBN now derives its authority from `timeline.current_state`, not from the legacy source-specific trigger field. It persists all accepted canonical ASOS derivations first, computes the source-neutral timeline, and then trades only when the current weather row created the canonical transition.
+
+DSN/SBK/HSR also receive the canonical accumulator state in `strategy_runtime_hardened.py`. Their guarded weather view contains the canonical bound, first-known timestamp, state, timeline and transition-evidence ID. Research strategies remain on the separate legacy/research path.
+
+### New regression cases
+
+- `86 -> 87 -> 88 -> later 85` remains 88;
+- later six-hour 88 after earlier precise 88 is corroboration, not transition;
+- station/date/calendar/trust mismatch is rejected explicitly;
+- a physically earlier but later-received hot observation cannot leak into earlier replay state;
+- duplicate evidence ID cannot retrigger;
+- the same evidence stream produces identical transitions independent of input order;
+- same-response current 74 + hidden six-hour 77 produces one atomic 77 transition;
+- DBN follows the canonical transition even when the legacy proof trigger is intentionally set stale/wrong in the test;
+- a later lower row cannot retrigger DBN even when a deliberately wrong legacy trigger claims it did;
+- application/transition rows reject UPDATE and DELETE in a real Postgres migration test.
+
+### Verification
+
+GitHub Actions `Paper Trader CI` **run 298**:
+- Python compile: PASS;
+- full Python suite: **92 tests, 0 failures**;
+- dependency import check: PASS;
+- collector Docker build including accumulator/journal modules: PASS;
+- Node checks: PASS;
+- all SQL migrations: PASS;
+- immutable raw/evidence journal regression: PASS;
+- immutable hard-state timeline regression: PASS.
+
+Branch head that triggered the verified run: `0bea79347ad1dede57daafd7e315f4ee3189a73e`.
+
+### Behavioral scope / next step
+
+4D does **not** yet claim the DSM/CLI QC-disagreement audit requirement; that is explicitly deferred to 4H. It also does not implement the final pure strike-semantics boundary.
+
+**Next: Step 4E — pure bucket elimination.** It must receive only exact event/market strike metadata plus canonical `HardClimateState`, derive every and only impossible bucket, preserve a machine-readable elimination proof, and fail closed on incomplete/ambiguous station/date/strike metadata.
+
+No merge, Railway deployment, portfolio reset or new performance replay has occurred.
