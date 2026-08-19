@@ -61,14 +61,15 @@ def _persist_canonical_evidence(
     proof: hard_state_proof.HardStateProof,
     station: str,
 ) -> tuple[str, ...]:
-    """Append versioned derivations for proof records with immutable captures.
+    """Append every accepted versioned ASOS derivation with immutable provenance.
 
-    Historical rows created before Step 4B have no raw_source_id and therefore
-    remain replayable but are intentionally not back-filled with invented raw
-    provenance.
+    A routine METAR can contain a lower current value plus a higher six-hour
+    maximum. Both facts are persisted independently even though only the latter
+    establishes the current hard-state bound. Historical rows created before
+    Step 4B remain replayable but are not back-filled with invented provenance.
     """
     persisted: list[str] = []
-    for record, evidence in zip(proof.supporting_records, proof.canonical_evidence(station)):
+    for record, evidence in zip(proof.evidence_records, proof.all_canonical_evidence(station)):
         if record.raw_source_id is None:
             continue
         persisted.append(raw_journal.persist_evidence_derivation(
