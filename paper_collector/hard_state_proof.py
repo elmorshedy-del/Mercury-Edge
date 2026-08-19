@@ -48,6 +48,7 @@ _KIND_PRIORITY = {"main_temp_c": 1, "t_group": 2, "six_hour_max": 3}
 @dataclass(frozen=True)
 class ProofRecord:
     weather_id: int
+    raw_source_id: int | None
     source: str
     report_type: str
     observed_at: datetime
@@ -64,6 +65,7 @@ class ProofRecord:
     def as_dict(self) -> dict[str, Any]:
         return {
             "weather_id": self.weather_id,
+            "raw_source_id": self.raw_source_id,
             "source": self.source,
             "report_type": self.report_type,
             "observed_at": self.observed_at,
@@ -84,6 +86,7 @@ class ProofRecord:
             "evidence",
             station_code,
             climate_trade_date.isoformat(),
+            self.raw_source_id if self.raw_source_id is not None else f"legacy-weather:{self.weather_id}",
             self.weather_id,
             self.kind,
             self.raw_group,
@@ -102,12 +105,17 @@ class ProofRecord:
             if len(self.possible_canonical_f) == 1
             else IntegrityStatus.AMBIGUOUS
         )
+        source_record_id = (
+            f"raw_source_journal:{self.raw_source_id}"
+            if self.raw_source_id is not None
+            else f"live_weather_journal:{self.weather_id}"
+        )
         return SettlementEvidence(
             evidence_id=self.evidence_id(station_code, climate_trade_date),
             evidence_type=evidence_type,
             station_code=station_code,
             climate_date=climate_trade_date,
-            source_record_ids=(f"live_weather_journal:{self.weather_id}",),
+            source_record_ids=(source_record_id,),
             proven_min_f=self.proven_min_f,
             proven_max_f=self.proven_max_f,
             integrity_status=integrity,
@@ -115,8 +123,6 @@ class ProofRecord:
             clocks=SourceClocks(
                 observed_at=self.observed_at,
                 mercury_received_at=_received_at(self.received_epoch_ms, self.first_seen_at),
-                # Existing AWC journal does not separately preserve these clocks.
-                # Step 4B adds the immutable journal fields; do not fabricate them.
                 mercury_interpreted_at=None,
                 source_published_at=None,
                 first_fetchable_at=None,
@@ -128,6 +134,8 @@ class ProofRecord:
             possible_canonical_f=self.possible_canonical_f,
             metadata={
                 "weather_id": self.weather_id,
+                "raw_source_id": self.raw_source_id,
+                "immutable_raw_provenance": self.raw_source_id is not None,
                 "source": self.source,
                 "report_type": self.report_type,
                 "grade": self.grade,
@@ -161,6 +169,20 @@ class HardStateProof:
     @property
     def hard_state_proven(self) -> bool:
         return True
+
+    @property
+    def immutable_provenance_complete(self) -> bool:
+        return bool(self.supporting_records) and all(
+            record.raw_source_id is not None for record in self.supporting_records
+        )
+
+    @property
+    def raw_source_ids_at_bound(self) -> tuple[int, ...]:
+        return tuple(dict.fromkeys(
+            int(record.raw_source_id)
+            for record in self.supporting_records
+            if record.raw_source_id is not None
+        ))
 
     def is_new_transition(self, current_weather_id: int) -> bool:
         return self.trigger_weather_id == int(current_weather_id)
@@ -233,6 +255,8 @@ class HardStateProof:
             "trigger_raw_group": self.trigger_raw_group,
             "trigger_grade": self.trigger_grade,
             "source_weather_ids_at_bound": list(self.source_weather_ids_at_bound),
+            "raw_source_ids_at_bound": list(self.raw_source_ids_at_bound),
+            "immutable_provenance_complete": self.immutable_provenance_complete,
             "supporting_records": [record.as_dict() for record in self.supporting_records],
             "rejected_row_count": self.rejected_row_count,
         }
@@ -274,7 +298,7 @@ def _row_evidence_is_coherent(items: list[TemperatureEvidence]) -> bool:
 
 
 def _records_for_row(row: tuple[Any, ...], timezone_name: str) -> tuple[list[ProofRecord], bool]:
-    weather_id, source, report_type, observed_at, first_seen_at, received_epoch_ms, raw_text = row
+    weather_id, raw_source_id, source, report_type, observed_at, first_seen_at, received_epoch_ms, raw_text = row
     if str(source) != "NOAA_AWC" or not raw_text:
         return [], False
 
@@ -299,6 +323,7 @@ def _records_for_row(row: tuple[Any, ...], timezone_name: str) -> tuple[list[Pro
             continue
         records.append(ProofRecord(
             weather_id=int(weather_id),
+            raw_source_id=int(raw_source_id) if raw_source_id is not None else None,
             source=str(source),
             report_type=str(report_type),
             observed_at=observed_at,
@@ -333,7 +358,7 @@ def proof_for_weather(
     start_utc, end_utc = climate_day_bounds(day, timezone_name)
     rows = conn.execute(
         """
-        SELECT id,source,report_type,observed_at,first_seen_at,received_epoch_ms,raw_text
+        SELECT id,raw_source_id,source,report_type,observed_at,first_seen_at,received_epoch_ms,raw_text
           FROM live_weather_journal
          WHERE session_id=%s
            AND station_code=%s
