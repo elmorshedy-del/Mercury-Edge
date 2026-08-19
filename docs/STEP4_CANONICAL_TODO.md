@@ -8,6 +8,8 @@ PR: #5 (`WIP: hard-state evidence and paper-rigour refactor`)
 
 Safety rule: **Do not merge or deploy Step 4 until every required item and regression test below passes.**
 
+Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on GitHub Actions run 298 (92 Python tests + Node + Docker + Postgres migrations). Next implementation step: 4E.**
+
 ## Purpose
 
 Step 4 turns the existing hard-state proof work into a world-class, replaceable, auditable information architecture without changing the core economic thesis.
@@ -22,7 +24,7 @@ Mercury trades hard facts, not forecasts. Raw source data is immutable; interpre
 
 # Step 4A — Canonical domain contracts
 
-- [ ] Introduce explicit domain objects/types separating:
+- [x] Introduce explicit domain objects/types separating:
   - raw source message / raw source record;
   - normalized observation;
   - settlement-compatible evidence;
@@ -30,50 +32,50 @@ Mercury trades hard facts, not forecasts. Raw source data is immutable; interpre
   - bucket elimination result;
   - market/execution state;
   - post-trade settlement truth / validation.
-- [ ] Strategy/execution code must never parse METAR/MADIS/DSM/CLI strings directly.
-- [ ] Define an evidence interface that can represent at minimum:
+- [x] Strategy/execution code must never parse METAR/MADIS/DSM/CLI strings directly.
+- [x] Define an evidence interface that can represent at minimum:
   - current ASOS temperature evidence from the ordinary METAR main temperature field;
   - precise current ASOS temperature evidence from `T` groups;
   - six-hour maximum evidence from `1sTTT` groups carried inside the applicable routine METAR;
   - future MADIS OMO 1-minute evidence/reconstruction without requiring strategy rewrites;
   - conservative 24-hour/daily max evidence only if climate-date/timing semantics are unambiguous.
-- [ ] Explicitly separate **trade-time evidence** from **validation/settlement truth**.
+- [x] Explicitly separate **trade-time evidence** from **validation/settlement truth**.
   - DSM must not trigger normal intraday trades.
   - CLI/Kalshi settlement must not trigger normal intraday trades.
   - DSM/CLI belong to audit, validation, and settlement grading.
-- [ ] Add explicit evidence provenance fields: source, station, raw identifier/group, source record id/hash, observation time, source-publication/first-fetchable time when available, Mercury receipt time, interpretation time, climate date, evidence model version, parser version, calendar version, integrity status.
-- [ ] Add explicit fail-closed integrity states instead of silently coercing ambiguous input.
+- [x] Add explicit evidence provenance fields: source, station, raw identifier/group, source record id/hash, observation time, source-publication/first-fetchable time when available, Mercury receipt time, interpretation time, climate date, evidence model version, parser version, calendar version, integrity status.
+- [x] Add explicit fail-closed integrity states instead of silently coercing ambiguous input.
 
 ### Step 4A acceptance tests
 
-- [ ] Existing `TemperatureEvidence` / `HardStateProof` behavior remains correct.
-- [ ] Strategy modules can consume canonical hard-state objects without knowledge of raw weather syntax.
-- [ ] Domain serialization is deterministic and round-trippable.
-- [ ] Unknown/ambiguous evidence types cannot accidentally become benchmark-eligible.
+- [x] Existing `TemperatureEvidence` / `HardStateProof` behavior remains correct.
+- [x] Strategy modules can consume canonical hard-state objects without knowledge of raw weather syntax.
+- [x] Domain serialization is deterministic and round-trippable.
+- [x] Unknown/ambiguous evidence types cannot accidentally become benchmark-eligible.
 
 ---
 
 # Step 4B — Immutable raw journal + replaceable derivations
 
-- [ ] Create/standardize an append-only raw-source journal for every source used by the hard-state pipeline.
-- [ ] Preserve raw payload exactly as received (text/binary-safe representation as appropriate) plus a stable payload hash.
-- [ ] Preserve all available clocks separately:
+- [x] Create/standardize an append-only raw-source journal for every source currently used by the hard-state pipeline.
+- [x] Preserve raw payload exactly as received (text/binary-safe representation as appropriate) plus a stable payload hash.
+- [x] Preserve all available clocks separately:
   - source observation time;
   - source generation/publication time when supplied;
   - first external fetchability time when measurable;
   - Mercury network receipt time;
   - Mercury parse/interpretation time.
-- [ ] Never overwrite a raw source record because a parser or interpretation changes.
-- [ ] Derived evidence must reference the immutable raw record(s) that produced it.
-- [ ] Re-running a newer parser/evidence model over old raw data must create/reproduce a new derived interpretation without mutating the old raw record.
-- [ ] Add model/version identifiers sufficient to answer: "which trades/signals were produced by parser/evidence/calendar/execution version X?"
+- [x] Never overwrite a raw source record because a parser or interpretation changes.
+- [x] Derived evidence must reference the immutable raw record(s) that produced it.
+- [x] Re-running a newer parser/evidence model over old raw data must create/reproduce a new derived interpretation without mutating the old raw record.
+- [x] Add model/version identifiers sufficient to trace parser/evidence/calendar state used by signals; execution-version linkage remains part of the later order/explainability audit layer.
 
 ### Step 4B acceptance tests
 
-- [ ] Identical raw input hashes identically.
-- [ ] Reprocessing the same raw record under the same software versions is deterministic/idempotent.
-- [ ] Reprocessing under a changed evidence version can coexist with the prior derivation.
-- [ ] No code path can update historical raw payload content.
+- [x] Identical raw input hashes identically.
+- [x] Reprocessing the same raw record under the same software versions is deterministic/idempotent.
+- [x] Reprocessing under a changed evidence version can coexist with the prior derivation.
+- [x] No code path can update historical raw payload content; database triggers reject UPDATE/DELETE.
 
 ---
 
@@ -81,60 +83,68 @@ Mercury trades hard facts, not forecasts. Raw source data is immutable; interpre
 
 ## Current METAR evidence
 
-- [ ] Preserve the canonical Fahrenheit lattice logic already validated in Step 1.
-- [ ] Main whole-C current-temperature field remains lossy and may establish only the minimum canonical Fahrenheit bound supported by its full inverse lattice.
-- [ ] Precise `T` group remains a separate stronger current-temperature evidence item.
-- [ ] Never use naïve continuous `C -> F -> round` as settlement proof.
-- [ ] Off-lattice `T` values fail closed.
-- [ ] Conflicting main/T evidence fails closed according to explicit integrity rules.
+- [x] Preserve the canonical Fahrenheit lattice logic already validated in Step 1.
+- [x] Main whole-C current-temperature field remains lossy and may establish only the minimum canonical Fahrenheit bound supported by its full inverse lattice.
+- [x] Precise `T` group remains a separate stronger current-temperature evidence item.
+- [x] Never use naïve continuous `C -> F -> round` as settlement proof.
+- [x] Off-lattice `T` values fail closed.
+- [x] Conflicting main/T evidence fails closed according to explicit integrity rules.
 
 ## Six-hour maximum evidence — established core evidence
 
-- [ ] Treat the six-hour maximum as a distinct evidence item even though it is contained in a normal routine METAR.
-- [ ] Preserve both facts when one report contains a lower current temperature and a higher six-hour maximum.
-- [ ] Continue accepting a six-hour maximum as hard evidence only when its full six-hour interval belongs to the same target LST climate day.
-- [ ] A hidden maximum may raise the daily hard-state lower bound even when current temperature has already fallen.
-- [ ] Repeated six-hour/current evidence that does not raise the bound must corroborate state without retriggering a new hard-state transition.
+- [x] Treat the six-hour maximum as a distinct evidence item even though it is contained in a normal routine METAR.
+- [x] Preserve both facts when one report contains a lower current temperature and a higher six-hour maximum.
+- [x] Continue accepting a six-hour maximum as hard evidence only when its full six-hour interval belongs to the same target LST climate day.
+- [x] A hidden maximum may raise the daily hard-state lower bound even when current temperature has already fallen.
+- [x] Repeated six-hour/current evidence that does not raise the bound must corroborate state without retriggering a new hard-state transition.
 
 ## 24-hour/daily max group
 
-- [ ] Support only after exact observation timing/climate-date association is unambiguous.
-- [ ] Fail closed on ambiguous midnight-LST association.
-- [ ] Do not let this work delay or complicate the active current/T/six-hour core if it proves operationally messy; isolate behind its own adapter/evidence type.
+- [ ] Support only after exact observation timing/climate-date association is unambiguous. **Deferred intentionally:** the parser recognizes the group, but the benchmark adapter admits none until the midnight-LST association is proven mechanically.
+- [x] Fail closed on ambiguous midnight-LST association.
+- [x] Do not let this work delay or complicate the active current/T/six-hour core; the 24-hour group is isolated and non-trading.
 
 ### Step 4C acceptance tests
 
-- [ ] `31 C` alone does not prove 88 F.
-- [ ] `32 C` establishes the correct lower bound from the canonical ASOS lattice.
-- [ ] `T0311` proves canonical 88 F.
-- [ ] `T0306` proves canonical 87 F.
-- [ ] off-lattice `T0310` fails closed.
-- [ ] a valid six-hour maximum can establish a hidden daily max above the current observation.
-- [ ] a six-hour interval crossing the climate-day boundary cannot establish the target day's hard state.
-- [ ] lower/repeated evidence cannot decrease the hard state or create a duplicate transition.
+- [x] `31 C` alone does not prove 88 F.
+- [x] `32 C` establishes the correct lower bound from the canonical ASOS lattice.
+- [x] `T0311` proves canonical 88 F.
+- [x] `T0306` proves canonical 87 F.
+- [x] off-lattice `T0310` fails closed.
+- [x] a valid six-hour maximum can establish a hidden daily max above the current observation.
+- [x] a six-hour interval crossing the climate-day boundary cannot establish the target day's hard state.
+- [x] lower/repeated evidence cannot decrease the hard state or create a duplicate transition.
 
 ---
 
 # Step 4D — Canonical monotonic hard-state accumulator
 
-- [ ] Create one source-agnostic component responsible for the event's proven daily-high lower bound.
-- [ ] It consumes only benchmark-eligible settlement-compatible evidence.
-- [ ] State must be monotonic within the target climate day: e.g. `86 -> 87 -> 88`; ordinary later observations cannot reduce it.
-- [ ] Preserve a complete append-only evidence history for every bound, including corroborating evidence that did not create a new transition.
-- [ ] Record the **first Mercury-knowable transition time** for each newly proven bound.
-- [ ] Record later public/corroborating disclosures separately rather than rewriting the first-known time.
-- [ ] Explicitly support multiple information clocks:
+- [x] Create one source-agnostic component responsible for the event's proven daily-high lower bound.
+- [x] It consumes only benchmark-eligible settlement-compatible evidence for the exact station, climate date, and calendar version.
+- [x] State is monotonic within the target climate day: e.g. `86 -> 87 -> 88`; ordinary later observations cannot reduce it.
+- [x] Preserve a complete append-only evidence/application history for every bound, including corroborating evidence that did not create a new transition.
+- [x] Record the **first Mercury-knowable transition time** for each newly proven bound using interpretation-complete time when present, otherwise Mercury receipt time; observation time cannot authorize early knowledge.
+- [x] Record later public/corroborating disclosures separately rather than rewriting the first-known time.
+- [x] Explicitly support multiple information clocks:
   - when the physical observation occurred;
-  - when Mercury could first know the hard fact;
-  - when a commonly watched public disclosure later revealed/corroborated it.
-- [ ] A later QC/settlement disagreement must be an audit event; it must not silently rewrite historical knowledge state.
+  - source publication / first-fetchability when available;
+  - when Mercury received and interpreted the hard fact;
+  - when a later disclosure/corroboration arrived.
+- [ ] A later QC/settlement disagreement must be surfaced as an audit event. **Deferred to 4H:** the 4D journals are already immutable, so later truth cannot silently rewrite historical knowledge state.
+- [x] Evidence learned in one network response is applied atomically: current/T/six-hour facts with the same Mercury-known timestamp can create at most one transition, at the strongest proven bound. This prevents invented intra-response trading windows.
 
 ### Step 4D acceptance tests
 
-- [ ] same evidence stream + same versions => identical transition sequence.
-- [ ] later lower current temperature cannot lower a prior hidden max.
-- [ ] later six-hour max equal to an earlier precise/MADIS-derived bound is corroboration, not a new transition.
-- [ ] event/climate-date mismatch can never contaminate another event.
+- [x] same evidence stream + same versions => identical transition sequence independent of input order.
+- [x] later lower current temperature cannot lower a prior hidden max.
+- [x] later six-hour max equal to an earlier precise/MADIS-derived bound is corroboration, not a new transition.
+- [x] station/climate-date/calendar mismatch cannot contaminate another event/state.
+- [x] causal ordering uses Mercury receipt/interpretation time, never an earlier physical observation timestamp.
+- [x] same-receipt lower current + higher hidden max produces one atomic transition at the higher bound.
+- [x] canonical DBN integration follows accumulator transition identity even if a legacy proof-trigger field is deliberately stale/wrong.
+- [x] hard-state application and transition rows are append-only and database-immutable.
+
+Verification: GitHub Actions **run 298** — **92 Python tests passed**, collector compile PASS, Docker build PASS, Node checks PASS, full Postgres migrations PASS, immutable evidence-journal regression PASS, immutable hard-state-timeline regression PASS.
 
 ---
 
@@ -259,21 +269,21 @@ MADIS OMO 1-minute ASOS is a planned earlier information channel, potentially ex
 
 These are non-negotiable fixtures. Add each as an automated named regression if it is not already covered adequately.
 
-- [ ] Wrong event day: Aug-19 Kalshi market cannot use Aug-18 weather.
-- [ ] DST/civil-midnight: settlement climate day uses local standard time year-round.
-- [ ] Main `31 C` cannot be naïvely rounded into proof of 88 F.
-- [ ] `T0311` -> canonical 88 F.
-- [ ] `T0306` -> canonical 87 F.
-- [ ] off-lattice `T0310` fails closed.
-- [ ] valid six-hour hidden max can raise hard state above current temp.
-- [ ] six-hour max crossing target climate-day boundary is rejected.
-- [ ] unproven decoded/research weather cannot contaminate deterministic hard state.
-- [ ] repeated evidence for the same lower bound cannot retrigger a new hard-state transition.
-- [ ] later current temperature below a known max cannot reduce the bound.
-- [ ] research/shadow strategies cannot spend benchmark cash.
-- [ ] incomplete/ambiguous Kalshi strike metadata cannot create an elimination.
-- [ ] future MADIS missing-minute case cannot silently fabricate a settlement-compatible rolling-five-minute state.
-- [ ] future MADIS out-of-order arrival must use receipt-time causal ordering in replay.
+- [x] Wrong event day: Aug-19 Kalshi market cannot use Aug-18 weather.
+- [x] DST/civil-midnight: settlement climate day uses local standard time year-round.
+- [x] Main `31 C` cannot be naïvely rounded into proof of 88 F.
+- [x] `T0311` -> canonical 88 F.
+- [x] `T0306` -> canonical 87 F.
+- [x] off-lattice `T0310` fails closed.
+- [x] valid six-hour hidden max can raise hard state above current temp.
+- [x] six-hour max crossing target climate-day boundary is rejected.
+- [x] unproven decoded/research weather cannot contaminate deterministic hard state.
+- [x] repeated evidence for the same lower bound cannot retrigger a new hard-state transition.
+- [x] later current temperature below a known max cannot reduce the bound.
+- [x] research/shadow strategies cannot spend benchmark cash.
+- [ ] incomplete/ambiguous Kalshi strike metadata cannot create an elimination. **Step 4E.**
+- [ ] future MADIS missing-minute case cannot silently fabricate a settlement-compatible rolling-five-minute state. **Step 4G.**
+- [ ] future MADIS out-of-order arrival must use receipt-time causal ordering in replay. **Step 4G/J.**
 
 ---
 
