@@ -11,6 +11,13 @@ maximum temperature.
 Step 4 adds a source-neutral domain boundary: raw proof records can be adapted
 into canonical SettlementEvidence and HardClimateState objects. Strategy code
 may consume those canonical objects without learning METAR syntax.
+
+Important distinction: a single routine METAR can contain several independent
+pieces of settlement information at once (for example a lower current T-group
+and a higher six-hour maximum).  `all_records` preserves every accepted causal
+item; `supporting_records` contains only the records that establish the current
+hard lower bound.  This prevents information loss while keeping hard-state
+transition semantics simple.
 """
 
 from dataclasses import dataclass
@@ -165,6 +172,7 @@ class HardStateProof:
     source_weather_ids_at_bound: tuple[int, ...]
     supporting_records: tuple[ProofRecord, ...]
     rejected_row_count: int
+    all_records: tuple[ProofRecord, ...] = ()
 
     @property
     def hard_state_proven(self) -> bool:
@@ -172,6 +180,7 @@ class HardStateProof:
 
     @property
     def immutable_provenance_complete(self) -> bool:
+        """Whether every record actually authorizing the current bound is immutable."""
         return bool(self.supporting_records) and all(
             record.raw_source_id is not None for record in self.supporting_records
         )
@@ -184,6 +193,11 @@ class HardStateProof:
             if record.raw_source_id is not None
         ))
 
+    @property
+    def evidence_records(self) -> tuple[ProofRecord, ...]:
+        """All accepted causal evidence, with backward compatibility for old fixtures."""
+        return self.all_records or self.supporting_records
+
     def is_new_transition(self, current_weather_id: int) -> bool:
         return self.trigger_weather_id == int(current_weather_id)
 
@@ -191,9 +205,17 @@ class HardStateProof:
         return Decimal(self.proven_daily_high_min_f) > Decimal(str(upper_bound_f))
 
     def canonical_evidence(self, station_code: str) -> tuple[SettlementEvidence, ...]:
+        """Evidence records that establish the current hard lower bound."""
         return tuple(
             record.to_settlement_evidence(station_code, self.climate_trade_date)
             for record in self.supporting_records
+        )
+
+    def all_canonical_evidence(self, station_code: str) -> tuple[SettlementEvidence, ...]:
+        """Every accepted causal current/T/six-hour evidence item seen so far."""
+        return tuple(
+            record.to_settlement_evidence(station_code, self.climate_trade_date)
+            for record in self.evidence_records
         )
 
     def to_hard_state(self, station_code: str) -> HardClimateState:
@@ -258,6 +280,7 @@ class HardStateProof:
             "raw_source_ids_at_bound": list(self.raw_source_ids_at_bound),
             "immutable_provenance_complete": self.immutable_provenance_complete,
             "supporting_records": [record.as_dict() for record in self.supporting_records],
+            "all_records": [record.as_dict() for record in self.evidence_records],
             "rejected_row_count": self.rejected_row_count,
         }
 
@@ -311,7 +334,9 @@ def _records_for_row(row: tuple[Any, ...], timezone_name: str) -> tuple[list[Pro
         if not item.hard_state_eligible or item.proven_min_f is None or item.proven_max_f is None:
             continue
         if item.kind == "twenty_four_hour_max":
-            # Step 4C maps the 24-hour timing semantics explicitly before trust.
+            # Parsed but intentionally not admitted into benchmark hard state.
+            # Its midnight-LST climate-date association gets an isolated adapter
+            # only after the timing semantics are proven unambiguous.
             continue
         if item.kind == "six_hour_max":
             if not six_hour_window_within_climate_day(observed_at, timezone_name):
@@ -392,8 +417,12 @@ def proof_for_weather(
     if not records:
         return None
 
-    daily_min = max(record.proven_min_f for record in records)
-    at_bound = [record for record in records if record.proven_min_f == daily_min]
+    ordered_records = tuple(sorted(
+        records,
+        key=lambda record: (record.first_seen_at, record.weather_id, _KIND_PRIORITY.get(record.kind, 0)),
+    ))
+    daily_min = max(record.proven_min_f for record in ordered_records)
+    at_bound = [record for record in ordered_records if record.proven_min_f == daily_min]
     earliest_key = min((record.first_seen_at, record.weather_id) for record in at_bound)
     first_bound = [
         record for record in at_bound
@@ -418,4 +447,5 @@ def proof_for_weather(
         source_weather_ids_at_bound=source_ids,
         supporting_records=support,
         rejected_row_count=rejected_rows,
+        all_records=ordered_records,
     )
