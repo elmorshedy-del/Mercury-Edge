@@ -10,6 +10,8 @@ from madis_omo import (
     ContractMadisOmoAdapter,
     MADIS_OMO_ADAPTER_VERSION,
     MADIS_OMO_SOURCE,
+    MADIS_OMO_TEMPERATURE_UNIT,
+    MADIS_OMO_TEMPERATURE_VARIABLE,
     MadisMinuteStatus,
     MadisOmoSourceAdapter,
 )
@@ -51,10 +53,10 @@ def parse(record: RawSourceRecord | None = None, **field_overrides):
     fields = {
         "station_code": "KLAX",
         "observed_at": datetime(2026, 8, 18, 18, 41, tzinfo=UTC),
-        "temperature": "25.37",
-        "temperature_unit": "degC",
-        "upstream_variable": "temperature",
-        "qc_status": "accepted",
+        "temperature": "298.52",
+        "temperature_unit": MADIS_OMO_TEMPERATURE_UNIT,
+        "upstream_variable": MADIS_OMO_TEMPERATURE_VARIABLE,
+        "temperature_sensor_status": 0,
     }
     fields.update(field_overrides)
     return adapter.parse_minute(
@@ -108,19 +110,39 @@ class MadisOmoAdapterContractTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.minute.minute_id, second.minute.minute_id)
 
-    def test_source_wire_unit_is_preserved_not_silently_converted(self) -> None:
-        result = parse(temperature="25.37", temperature_unit="degC")
+    def test_official_source_unit_kelvin_is_preserved_not_silently_converted(self) -> None:
+        result = parse(temperature="298.52")
         observation = result.minute.to_normalized_observation()
         self.assertIsNotNone(observation)
         assert observation is not None
-        self.assertEqual(observation.value, Decimal("25.37"))
-        self.assertEqual(observation.unit, "degC")
+        self.assertEqual(observation.value, Decimal("298.52"))
+        self.assertEqual(observation.unit, "K")
+        self.assertEqual(observation.metadata["upstream_variable"], "T")
 
-    def test_unknown_unit_fails_closed(self) -> None:
-        result = parse(temperature_unit="kelvin")
+    def test_nonofficial_temperature_unit_fails_closed(self) -> None:
+        result = parse(temperature_unit="degC")
         self.assertEqual(result.minute.status, MadisMinuteStatus.INVALID_UNIT)
         self.assertFalse(result.accepted_for_research)
         self.assertIsNone(result.minute.to_normalized_observation())
+
+    def test_wrong_upstream_variable_fails_closed(self) -> None:
+        result = parse(upstream_variable="TD")
+        self.assertEqual(result.minute.status, MadisMinuteStatus.INVALID_VARIABLE)
+        self.assertFalse(result.accepted_for_research)
+
+    def test_nonoperating_temperature_sensor_status_fails_closed(self) -> None:
+        result = parse(temperature_sensor_status=3)
+        self.assertEqual(result.minute.status, MadisMinuteStatus.QC_REJECTED)
+        self.assertEqual(result.fail_closed_reason, "temperature_sensor_status_not_operating")
+        self.assertFalse(result.accepted_for_research)
+
+    def test_missing_tss_is_preserved_for_research_but_not_verified(self) -> None:
+        result = parse(temperature_sensor_status=None)
+        self.assertTrue(result.accepted_for_research)
+        self.assertFalse(result.minute.sensor_status_verified)
+        observation = result.minute.to_normalized_observation()
+        assert observation is not None
+        self.assertFalse(observation.metadata["sensor_status_verified"])
 
     def test_explicit_bad_qc_fails_closed(self) -> None:
         result = parse(qc_status="bad")
@@ -154,9 +176,10 @@ class MadisOmoAdapterContractTests(unittest.TestCase):
             fields={
                 "station_code": "KLAX",
                 "observed_at": observed,
-                "temperature": "20.0",
-                "temperature_unit": "degC",
-                "upstream_variable": "temperature",
+                "temperature": "293.15",
+                "temperature_unit": "K",
+                "upstream_variable": "T",
+                "temperature_sensor_status": 0,
             },
         )
         self.assertEqual(result.minute.climate_date, date(2026, 8, 18))
