@@ -6,6 +6,12 @@ This module intentionally does **not** reconstruct ASOS climate temperature and
 does **not** emit benchmark-eligible settlement evidence. It defines the stable
 boundary that a future real-time MADIS/LDM transport adapter must satisfy.
 
+Official MADIS 1-minute ASOS metadata identifies air temperature as variable
+``T`` in **Kelvin** and exposes temperature sensor status as ``TSS``. OMO
+messages are binary one-minute observations and are not METARs. The adapter
+therefore preserves the MADIS value/unit exactly and does not invent a C/F
+round-trip. Any conversion/reconstruction is a separately versioned model.
+
 The design keeps four concerns separate:
 
 1. exact immutable network bytes -> ``RawSourceRecord`` (raw_journal.py);
@@ -36,6 +42,8 @@ from hard_information_domain import (
 from market_calendar import CLIMATE_CALENDAR_VERSION, climate_date
 
 MADIS_OMO_SOURCE = "MADIS_OMO"
+MADIS_OMO_TEMPERATURE_VARIABLE = "T"
+MADIS_OMO_TEMPERATURE_UNIT = "K"
 MADIS_OMO_OBSERVATION_TYPE = EvidenceType.MADIS_OMO_1MIN.value
 MADIS_OMO_ADAPTER_VERSION = "madis-omo-adapter-contract-v1"
 MADIS_OMO_RESEARCH_EVIDENCE_VERSION = "madis-omo-minute-research-v1"
@@ -47,13 +55,8 @@ class MadisMinuteStatus(str, Enum):
     QC_REJECTED = "qc_rejected"
     CLOCK_SKEW = "clock_skew"
     INVALID_UNIT = "invalid_unit"
+    INVALID_VARIABLE = "invalid_variable"
     INVALID_SOURCE = "invalid_source"
-
-
-# The exact upstream unit/variable semantics are intentionally explicit rather
-# than guessed. A future real MADIS parser must map the documented field to one
-# of these values and carry the original field/unit in metadata.
-SUPPORTED_TEMPERATURE_UNITS = frozenset({"degC", "degF"})
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class MadisOmoMinute:
     temperature: Decimal | None
     temperature_unit: str | None
     upstream_variable: str | None
+    temperature_sensor_status: int | None
     qc_status: str | None
     sequence_key: str | None
     status: MadisMinuteStatus
@@ -82,6 +86,13 @@ class MadisOmoMinute:
     @property
     def research_usable(self) -> bool:
         return self.status is MadisMinuteStatus.ACCEPTED_RESEARCH and self.temperature is not None
+
+    @property
+    def sensor_status_verified(self) -> bool:
+        # MADIS note 35: TSS=0 means sensor operating/data available. A missing
+        # TSS can still be archived/researched but is not pre-cleared for any
+        # future reconstruction trust policy.
+        return self.temperature_sensor_status == 0
 
     @property
     def latency_ms_from_observation(self) -> int:
@@ -110,6 +121,8 @@ class MadisOmoMinute:
             metadata={
                 **dict(self.metadata),
                 "upstream_variable": self.upstream_variable,
+                "temperature_sensor_status": self.temperature_sensor_status,
+                "sensor_status_verified": self.sensor_status_verified,
                 "qc_status": self.qc_status,
                 "sequence_key": self.sequence_key,
                 "madis_minute_status": self.status.value,
@@ -121,9 +134,9 @@ class MadisOmoMinute:
     def to_research_evidence(self) -> SettlementEvidence | None:
         """Expose the sample to research/audit without granting settlement authority.
 
-        A raw one-minute value is not the ASOS five-minute climate state. Its
-        bounds are therefore deliberately unset and its trust is RESEARCH_ONLY.
-        The canonical hard-state accumulator cannot consume it.
+        MADIS OMO is the raw observed value on the minute, while ASOS climate
+        high/low uses the rolling five-minute average stored in whole °F. A raw
+        one-minute sample therefore has no settlement lower bound by itself.
         """
         observation = self.to_normalized_observation()
         if observation is None:
@@ -172,7 +185,7 @@ class MadisAdapterResult:
 
 @runtime_checkable
 class MadisOmoSourceAdapter(Protocol):
-    """Interface a future MADIS archive/LDM parser must implement."""
+    """Interface a future MADIS archive/LDM binary parser must implement."""
 
     adapter_version: str
 
@@ -188,12 +201,11 @@ class MadisOmoSourceAdapter(Protocol):
 
 
 class ContractMadisOmoAdapter:
-    """Minimal deterministic adapter over already-decoded MADIS field mappings.
+    """Deterministic contract over transport-decoded official MADIS fields.
 
-    This is deliberately not a claim about the final NOAA/MADIS wire schema.
-    The future transport-specific parser will translate documented fields into
-    this contract. Keeping that translation outside the reconstruction model
-    prevents a wire-format change from changing climate-state mathematics.
+    A future binary/netCDF/LDM reader maps the documented MADIS ``T``/``TSS``
+    fields into this small contract. Wire decoding stays outside reconstruction,
+    so transport/schema changes cannot silently alter climate mathematics.
     """
 
     adapter_version = MADIS_OMO_ADAPTER_VERSION
@@ -213,6 +225,7 @@ class ContractMadisOmoAdapter:
         temperature = _optional_decimal(fields.get("temperature"))
         unit = str(fields.get("temperature_unit") or "").strip() or None
         variable = str(fields.get("upstream_variable") or "").strip() or None
+        tss = _optional_int(fields.get("temperature_sensor_status"))
         qc_status = str(fields.get("qc_status") or "").strip() or None
 
         status = MadisMinuteStatus.ACCEPTED_RESEARCH
@@ -224,12 +237,18 @@ class ContractMadisOmoAdapter:
         elif not station:
             status = MadisMinuteStatus.INCOMPLETE
             reason = "missing_station_code"
+        elif variable != MADIS_OMO_TEMPERATURE_VARIABLE:
+            status = MadisMinuteStatus.INVALID_VARIABLE
+            reason = "unexpected_madis_temperature_variable"
         elif temperature is None:
             status = MadisMinuteStatus.INCOMPLETE
             reason = "missing_temperature"
-        elif unit not in SUPPORTED_TEMPERATURE_UNITS:
+        elif unit != MADIS_OMO_TEMPERATURE_UNIT:
             status = MadisMinuteStatus.INVALID_UNIT
-            reason = "unsupported_or_missing_temperature_unit"
+            reason = "madis_temperature_unit_must_be_kelvin"
+        elif tss is not None and tss != 0:
+            status = MadisMinuteStatus.QC_REJECTED
+            reason = "temperature_sensor_status_not_operating"
         elif not _qc_allows_research(qc_status):
             status = MadisMinuteStatus.QC_REJECTED
             reason = "upstream_qc_not_accepted"
@@ -265,6 +284,7 @@ class ContractMadisOmoAdapter:
             temperature=temperature,
             temperature_unit=unit,
             upstream_variable=variable,
+            temperature_sensor_status=tss,
             qc_status=qc_status,
             sequence_key=raw_record.sequence_key,
             status=status,
@@ -274,6 +294,8 @@ class ContractMadisOmoAdapter:
                 "raw_payload_hash": raw_record.payload_hash,
                 "raw_source": raw_record.source,
                 "raw_transport": raw_record.transport,
+                "official_madis_temperature_variable": MADIS_OMO_TEMPERATURE_VARIABLE,
+                "official_madis_temperature_unit": MADIS_OMO_TEMPERATURE_UNIT,
                 "source_release_to_ldm_ms": _latency_ms(raw_record.clocks.source_published_at, received),
                 "first_fetchable_to_ldm_ms": _latency_ms(raw_record.clocks.first_fetchable_at, received),
                 "observation_to_ldm_ms": _latency_ms(observed, received),
@@ -315,9 +337,19 @@ def _optional_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def _qc_allows_research(value: str | None) -> bool:
-    # Wire-specific QC vocabulary is not guessed here. Absence is preserved as
-    # unknown-but-research-usable; an explicit bad/rejected flag fails closed.
+    # MADIS QC outputs can be added here once the exact field representation in
+    # the chosen LDM/netCDF path is validated. Opaque explicit failures fail
+    # closed; absence is preserved for research but is not a trust promotion.
     if value is None:
         return True
     return value.strip().lower() not in {"bad", "reject", "rejected", "failed", "invalid"}
