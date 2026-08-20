@@ -8,7 +8,7 @@ PR: #5 (`WIP: hard-state evidence and paper-rigour refactor`)
 
 Safety rule: **Do not merge or deploy Step 4 until every required item and regression test below passes.**
 
-Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on run 298; 4E pure elimination PASS on run 312 (103 Python tests); 4F canonical stale dead-NO paper execution PASS on run 338 (117 Python tests + Node + Docker + Postgres migrations). Next implementation step: 4G.**
+Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on run 298; 4E pure elimination PASS on run 312; 4F canonical stale dead-NO paper execution PASS on run 338; 4G-A MADIS OMO adapter/trust contract PASS on run 352 (131 Python tests + Node + Docker + Postgres migrations). Next implementation substep: 4G-B reconstruction model.**
 
 ## Purpose
 
@@ -198,22 +198,24 @@ Verification: GitHub Actions **run 338** — **117 Python tests passed**, Python
 
 MADIS OMO 1-minute ASOS is a planned earlier information channel, potentially exposing a hidden hard maximum well before the six-hour max disclosure.
 
-- [ ] Define a `MADIS_OMO_1MIN` source adapter contract now without making it benchmark-eligible yet.
-- [ ] Preserve raw MADIS/LDM records and receipt ordering exactly when access becomes available.
-- [ ] Design the reconstruction interface for raw 1-minute temperatures -> exact/versioned ASOS rolling five-minute climate-state reconstruction.
-- [ ] Reconstruction logic must be isolated from source transport and from trading strategy code.
-- [ ] Explicitly handle and test missing minutes, duplicate records, late/out-of-order arrival, corrections/QC flags, reconnects, and clock skew.
-- [ ] Record observation time -> source/MADIS release time if available -> LDM receipt -> Mercury interpretation latency.
+- [x] **4G-A:** Define a `MADIS_OMO_1MIN` source adapter contract without making it benchmark-eligible. The contract preserves official MADIS `T` in Kelvin, `TSS`, immutable raw provenance and separate clocks; raw minute evidence is `RESEARCH_ONLY` and cannot raise hard state.
+- [ ] Preserve raw MADIS/LDM records and receipt ordering exactly when live access becomes available. **Storage contract is already compatible through the generic immutable raw journal; actual LDM transport remains pending access/feed details.**
+- [ ] **4G-B:** Design and implement the reconstruction interface for raw 1-minute temperatures -> exact/versioned ASOS rolling five-minute climate-state reconstruction.
+- [x] Reconstruction/source boundaries are architecturally isolated from bucket elimination and dead-NO execution; 4G-A required no changes to either component.
+- [ ] Explicitly handle and test missing minutes, duplicate records, late/out-of-order arrival, corrections/QC flags, reconnects, and clock skew in the reconstruction/transport layer.
+- [x] The source contract records observation time -> source/MADIS release time if available -> first-fetchability if available -> LDM/Mercury receipt -> Mercury interpretation latency. **Actual live latency distributions remain pending feed access.**
 - [ ] Before promotion to benchmark evidence, validate reconstructed maxima over a substantial sample against precise T-groups, valid six-hour maxima, completed DSM, CLI, and settlement outcomes.
-- [ ] Promotion from research/validation to hard-state eligible must be a versioned/configured trust-policy change, not an architecture rewrite.
+- [x] Promotion from research/validation to hard-state eligible is structurally a separately versioned trust-policy/reconstruction change; raw `MADIS_OMO_1MIN` itself is permanently non-benchmark in the 4G-A adapter.
 - [ ] Historical archive availability must never be treated as contemporaneous live availability in replay.
 
 ### Step 4G acceptance tests/scaffolding
 
-- [ ] source adapter can be added without changes to elimination/execution code.
-- [ ] synthetic minute stream can be reconstructed deterministically.
-- [ ] missing/out-of-order records fail closed or produce an explicit non-tradable reconstruction state.
-- [ ] replay respects actual receipt time, never future archive knowledge.
+- [x] source adapter was added without changes to elimination/execution code.
+- [ ] synthetic minute stream can be reconstructed deterministically. **4G-B.**
+- [ ] missing/out-of-order records fail closed or produce an explicit non-tradable reconstruction state. **4G-B.**
+- [ ] replay respects actual receipt time, never future archive knowledge. **4G/J.**
+
+4G-A verification: GitHub Actions **run 352** — **131 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, immutable journal/timeline tests PASS. See `docs/STEP4G_A_VERIFICATION.md`. No MADIS reconstruction is benchmark eligible yet.
 
 ---
 
@@ -288,8 +290,8 @@ These are non-negotiable fixtures. Add each as an automated named regression if 
 - [x] later current temperature below a known max cannot reduce the bound.
 - [x] research/shadow strategies cannot spend benchmark cash.
 - [x] incomplete/ambiguous Kalshi strike metadata cannot create an elimination.
-- [ ] future MADIS missing-minute case cannot silently fabricate a settlement-compatible rolling-five-minute state. **Step 4G.**
-- [ ] future MADIS out-of-order arrival must use receipt-time causal ordering in replay. **Step 4G/J.**
+- [ ] future MADIS missing-minute case cannot silently fabricate a settlement-compatible rolling-five-minute state. **Step 4G-B.**
+- [ ] future MADIS out-of-order arrival must use receipt-time causal ordering in replay. **Step 4G-B/J.**
 
 ---
 
