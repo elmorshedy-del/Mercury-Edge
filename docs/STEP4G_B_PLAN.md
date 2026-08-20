@@ -1,6 +1,6 @@
 # Step 4G-B plan — MADIS OMO current 5-minute climate-state decoding
 
-Status: **LOCKED / CORRECTED FROM EARLIER ROLLING-RECONSTRUCTION ASSUMPTION**
+Status: **4G-B1 PASS; 4G-B2 PASS; semantic correction locked. Next: 4G-C empirical validation.**
 
 Branch: `paper-rigour-v2`
 
@@ -60,43 +60,54 @@ Acceptance tests:
 - mapping model/version changes alter derivation identity;
 - no continuous K->F->round shortcut is used as settlement proof.
 
-Verification before semantic correction: GitHub Actions run 366 — 140 Python tests + Node + Docker + Postgres PASS. The mathematical inverse-lattice code remains useful; only its interpretation changes from "raw minute" to "OMO current five-minute state."
+Initial verification before semantic correction: GitHub Actions run 366 — 140 Python tests + Node + Docker + Postgres PASS. The inverse-lattice architecture was retained but its forward source model was corrected in B2 verification below to include the documented whole-°F -> 0.1°C OMO encoding before Kelvin storage.
 
-## 4G-B2 — Direct OMO five-minute climate-state research evidence
+## 4G-B2 — Direct OMO five-minute climate-state research evidence — PASS
 
-Replace the obsolete "re-average five OMO records" design with a direct, source-causal adapter:
+The obsolete "re-average five OMO records" design has been replaced with a direct, source-causal adapter:
 
 `MADIS OMO T (K) -> explicit inverse-lattice policy -> unique whole-°F ASOS five-minute state -> RESEARCH_ONLY SettlementEvidence`
 
-Requirements:
+Implemented requirements:
 
-- A unique mapped OMO temperature may produce `MADIS_OMO_5M_CURRENT` research evidence for that observation minute.
-- No second rolling average may be applied to MADIS OMO `T`.
-- The OMO observation must have acceptable MADIS/QC status and verified operating temperature sensor status (`TSS=0`) for B2 research evidence.
+- A unique mapped OMO temperature produces direct five-minute-current research evidence for that observation minute.
+- **No second rolling average is applied** to MADIS OMO `T`.
+- The forward inverse-lattice source model now follows the documented ASOS path: whole °F -> nearest 0.1°C OMO representation -> Kelvin -> configured/versioned MADIS storage representation.
+- Example regression: canonical 88°F -> 31.1°C -> 304.25 K before any configured MADIS storage quantization.
+- The OMO observation requires acceptable MADIS/QC status and verified operating temperature sensor status (`TSS=0`) for B2 research evidence.
 - The mapped value remains `RESEARCH_ONLY`; it cannot alter benchmark hard state until the source-encoding policy and empirical behavior are validated and explicitly promoted.
 - Mercury-known time is receipt/interpretation causal, never backdated to the physical observation timestamp.
-- The exact raw MADIS source-record id, raw hash where available, source clocks, parser version, mapping-policy version and mapping-model version must be preserved.
-- Exact duplicate derivations are idempotent.
-- Two different accepted values for the same station/observation minute are an explicit conflict; neither may silently overwrite the other.
-- Missing OMO minutes do **not** invalidate a received state or justify interpolation. They can only make Mercury miss a possible maximum. A gap can reduce sensitivity, never fabricate a higher bound.
-- Late/out-of-order records may still be interpreted, but their information cannot be backdated: they become knowable only at their actual Mercury receipt/interpretation time.
-- Reconnect/sequence gaps remain explicit provenance/audit information. They do not erase a directly received valid state, but they prevent claims that Mercury observed every intervening state.
-- Research daily-high lower bound is simply the monotonic maximum of valid received OMO five-minute states for the target LST climate day.
+- Raw MADIS source-record identity/hash where available, source clocks, parser version, mapping-policy version, mapping-model version and calendar version are preserved.
+- Exact duplicate input is idempotent.
+- Two different accepted values for the same station/observation minute are an explicit conflict; neither is emitted as usable research evidence.
+- Missing OMO minutes do **not** invalidate a directly received state and never justify interpolation. A gap can only cause Mercury to miss a possible maximum.
+- Late/out-of-order records can be interpreted, but become knowable only at actual Mercury receipt/interpretation time.
+- Research daily-high lower bound is the monotonic maximum of valid received OMO five-minute states for the target LST climate day.
+- Direct OMO research evidence is rejected by the benchmark hard-state accumulator because its trust remains `RESEARCH_ONLY`.
+- No bucket-elimination or execution code changed.
 
-Acceptance tests:
+Acceptance tests passed:
 
 - one unique valid OMO mapping creates one research-only five-minute current evidence item;
 - the evidence cannot change benchmark hard state;
-- a later lower OMO state cannot lower the research daily-high lower bound;
-- a missing minute cannot create/interpolate a state;
-- a late older observation uses the late Mercury-known time, not the old physical timestamp;
+- later lower OMO state cannot lower the research daily-high lower bound;
+- missing minute cannot create/interpolate a state;
+- late older observation uses late Mercury-known time, not old physical timestamp;
 - same raw input + same versions is deterministic/idempotent;
 - conflicting same-minute accepted values fail closed;
 - non-operating/unverified TSS cannot produce B2 research state;
-- station/climate-date mismatch cannot contaminate another event;
-- direct OMO decoding requires no changes to bucket elimination/execution.
+- station/climate-date remain explicit and isolated;
+- direct OMO decoding applies no second rolling average;
+- corrected OMO Fahrenheit/Celsius/Kelvin lattice is regression-tested.
 
-Full Python/Node/Docker/Postgres CI must pass before B2 is documented complete.
+Verification: GitHub Actions **run 399 (`32395889553`)** — **165 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, all Postgres migrations PASS, immutable hard-information journal PASS, immutable hard-state timeline PASS, immutable Kalshi market journal PASS.
+
+Branch commits implementing the semantic correction/direct B2 path include:
+
+- `d43aa8dea3f5aa41535a0d3833219fa580d09989` — correct the locked B2 plan;
+- `b3d91219c2116bfff7378fdebca13c644c90fb36` — correct MADIS OMO source semantics;
+- `e4eaaaac831a55c3db93738488ffcc69ee8be45b` — direct OMO climate-state decoder/evidence;
+- `261c246a716131b011191d676fadeaa7db9b7b32` — corrected/direct OMO regression suite.
 
 ## 4G-C — Empirical validation before any trust promotion
 
