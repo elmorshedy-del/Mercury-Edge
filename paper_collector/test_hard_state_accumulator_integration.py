@@ -116,7 +116,7 @@ class CanonicalAccumulatorDbnIntegrationTests(unittest.TestCase):
              patch.object(dbn.base, "insert_signal", return_value=(10, "approved")) as insert_signal, \
              patch.object(dbn.base, "load_global", return_value={}), \
              patch.object(dbn.base, "load_modes", return_value=[]), \
-             patch.object(dbn.base, "execute_candidates", side_effect=lambda _c, candidates, _m, _g: captured.extend(candidates)):
+             patch.object(dbn.dead_no_executor, "execute_candidates", side_effect=lambda _c, candidates, _m, _g: captured.extend(candidates)):
             count = dbn.process_weather(FakeConnection(), weather(2, 20))
         self.assertEqual(count, 1)
         self.assertEqual(insert_signal.call_args.kwargs["confirmed_high"], Decimal("88"))
