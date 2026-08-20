@@ -1,6 +1,6 @@
 # Step 4G-C plan — empirical MADIS OMO validation and promotion gate
 
-Status: **4G-C1 PASS on GitHub Actions run 415 (`32398166021`), 177 Python tests + Node + Docker + Postgres. Next: 4G-C2 live-capture qualification contract. 4G-C3 remains blocked on actual MADIS access/data.**
+Status: **4G-C1 PASS on run 415 (177 Python tests); 4G-C2 PASS on run 431 (186 Python tests + Node + Docker + Postgres including immutable transport-event regression). Next: 4G-C3 empirical sample run, blocked on actual MADIS access/data. No benchmark promotion.**
 
 Branch: `paper-rigour-v2`
 
@@ -83,22 +83,47 @@ Rules implemented:
 
 Verification: GitHub Actions **run 415 (`32398166021`)** on code-complete commit `1c213fb8cf6ffe5121c4c3ef4fb168cc564f1373` — **177 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, SQL013 immutable hard-information journal PASS, SQL016 immutable hard-state timeline PASS, SQL017 immutable Kalshi market journal PASS.
 
-## 4G-C2 — Live capture qualification contract — NEXT
+## 4G-C2 — Live capture qualification contract — PASS
 
-Define the concrete transport qualification needed for a future LDM receiver without enabling production transport.
+Primary files:
+- `paper_collector/madis_transport.py`
+- `paper_collector/test_madis_transport.py`
+- `sql/018_source_transport_events.sql`
+- `sql/tests/018_source_transport_events_test.sql`
+- `docs/STEP4G_C2_VERIFICATION.md`
 
-Requirements:
+The transport boundary is now explicit without implementing or deploying an LDM client:
 
-- exact received product bytes must enter `raw_source_journal` before parsing;
-- one immutable capture per actual receipt, preserving duplicates/revisions;
-- preserve LDM product identity/sequence/arrival ordering where exposed;
-- preserve wall-clock and monotonic Mercury receipt clocks;
-- record parser completion separately;
-- reconnects and queue gaps must be explicit audit intervals;
-- no observation or source timestamp may substitute for Mercury receipt time;
-- archive download/import code must write to a separate replay/import path or explicitly mark `archive_only`; it may never masquerade as live receipt.
+`exact received bytes -> immutable raw_source_journal capture -> RawSourceRecord -> MADIS parser`
 
-C2 can be implemented without enabling Railway production transport. Deployment remains prohibited until the main Step 4 checklist permits it and the user explicitly approves.
+Implemented rules:
+
+- exact binary payload is required; semantic parsing cannot create the parser-facing `CapturedMadisRecord` until `insert_raw_capture()` has completed;
+- identical bytes received at different receipt times remain distinct causal captures;
+- `LIVE_LDM` and `ARCHIVE_IMPORT` are separate origins and source streams;
+- live captures preserve product id, connection id, sequence key, reconnect generation, receipt wall-clock and monotonic clocks;
+- archive imports cannot populate canonical `first_fetchable_at` as though an archive timestamp were contemporaneous availability; a supplied archive claim is retained only as metadata;
+- parsed MADIS minutes inherit explicit `madis_data_origin` and `live_causal` metadata from the persisted capture;
+- receipt time used by the parser remains the actual import/live receipt, never the physical observation time;
+- transport continuity facts such as reconnects, sequence gaps and queue gaps have deterministic `SourceTransportEvent` objects;
+- `source_transport_events` is append-only and DB-immutable, so later replay can distinguish complete source silence from a period where Mercury's transport coverage was incomplete.
+
+### 4G-C2 acceptance tests — PASS
+
+- live LDM envelope preserves exact bytes and receipt identity;
+- archive import is structurally distinct and cannot masquerade as live fetchability;
+- same bytes received later produce a distinct capture identity;
+- non-bytes payload fails before journaling;
+- persistence precedes parser-facing record creation;
+- live parse uses the actual receipt clock and carries live-causal provenance;
+- archive parse remains explicitly non-live;
+- sequence-gap event identity is deterministic and interval-aware;
+- invalid negative gap interval fails closed;
+- real Postgres regression rejects UPDATE/DELETE on source transport events.
+
+Verification: GitHub Actions **run 431 (`32398894745`)** on code-complete commit `f37f9816b1c0c148c47032f55dd33a439a96e8b1` — **186 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, SQL013/016/017/018 immutable regressions PASS.
+
+C2 deliberately does **not** create a live MADIS network connection or deploy anything. It qualifies the interface that a future receiver must satisfy.
 
 ## 4G-C3 — Empirical sample run — BLOCKED ON ACTUAL MADIS ACCESS/DATA
 
