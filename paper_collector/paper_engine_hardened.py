@@ -8,9 +8,9 @@ settlement-compatible canonical hard state establishes that a bucket is
 impossible.
 
 Step 4D makes the source-neutral accumulator authoritative for new immutable
-captures. Step 4E makes pure bucket elimination authoritative downstream: raw
-weather syntax and source identity are no longer involved once HardClimateState
-exists.
+captures. Step 4E makes pure bucket elimination authoritative downstream. Step
+4F routes benchmark execution through exact live-L2, fee-adjusted guaranteed
+NO economics rather than raw best-price edge calculations.
 """
 
 import json
@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 
 import bucket_elimination
+import dead_no_executor
 import hard_state_proof
 import paper_engine as base
 import raw_journal
@@ -55,8 +56,8 @@ def _risk_adjusted_mode_budget(
     )
 
 
-# base.execute_candidates resolves mode_budget from its module globals when it
-# runs, so this applies the drawdown gate without forking the fill/fee engine.
+# The canonical dead-NO executor resolves base.mode_budget at call time, so this
+# applies the drawdown gate without duplicating portfolio-risk logic.
 base.mode_budget = _risk_adjusted_mode_budget
 
 
@@ -376,5 +377,5 @@ def process_weather(conn: psycopg.Connection[Any], weather: dict[str, Any]) -> i
     if candidates:
         global_cfg = base.load_global(conn)
         modes = base.load_modes(conn)
-        base.execute_candidates(conn, candidates, modes, global_cfg)
+        dead_no_executor.execute_candidates(conn, candidates, modes, global_cfg)
     return len(candidates)
