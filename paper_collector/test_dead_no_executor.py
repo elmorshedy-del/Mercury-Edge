@@ -220,14 +220,14 @@ class PaperOrderWriteTests(unittest.TestCase):
         order_calls = [(q, p) for q, p in conn.calls if "INSERT INTO paper_orders" in q]
         self.assertEqual(len(order_calls), 1)
         params = order_calls[0][1]
-        audit = json.loads(params[17])
+        audit = json.loads(params[15])
         guarantee = audit["execution_guarantee"]
         self.assertEqual(guarantee["execution_model_version"], executor.EXECUTION_MODEL_VERSION)
         self.assertEqual(guarantee["execution_math_version"], executor.dne.EXECUTION_MATH_VERSION)
         self.assertEqual(guarantee["guaranteed_profit"], format(plan.guaranteed_profit, "f"))
         self.assertEqual(audit["bucket_elimination"]["elimination_id"], "elim:1")
 
-        book_snapshot = json.loads(params[16])
+        book_snapshot = json.loads(params[14])
         self.assertTrue(book_snapshot["l2_only"])
 
 
