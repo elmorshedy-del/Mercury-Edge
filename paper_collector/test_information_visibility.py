@@ -12,12 +12,15 @@ from hard_information_domain import (
 )
 from information_visibility import (
     AvailabilityBasis,
+    PublicDisclosure,
     VisibilityClass,
     build_information_view,
     build_public_information_state,
     classify_visibility,
     disclosure_time,
+    disclosures_for_evidence,
     first_ordinary_public_time_proving_bound,
+    to_disclosure,
 )
 
 UTC = timezone.utc
@@ -38,12 +41,19 @@ def evidence(
     proven_max_f: int | None = None,
     possible: tuple[int, ...] = (),
     source: str = "NOAA_AWC",
+    report_type: str | None = "METAR",
+    raw_payload_hash: str | None = None,
     trust: EvidenceTrust = EvidenceTrust.BENCHMARK_ELIGIBLE,
     integrity: IntegrityStatus = IntegrityStatus.CANONICAL,
     first_fetchable_at: datetime | None = None,
     source_published_at: datetime | None = None,
     interpreted_at: datetime | None = None,
 ) -> SettlementEvidence:
+    metadata = {"source": source}
+    if report_type is not None:
+        metadata["report_type"] = report_type
+    if raw_payload_hash is not None:
+        metadata["raw_payload_hash"] = raw_payload_hash
     return SettlementEvidence(
         evidence_id=evidence_id,
         evidence_type=evidence_type,
@@ -66,7 +76,7 @@ def evidence(
         calendar_version="lst-v1",
         raw_identifier=evidence_id,
         possible_canonical_f=possible,
-        metadata={"source": source},
+        metadata=metadata,
     )
 
 
@@ -154,6 +164,53 @@ class InformationVisibilityTests(unittest.TestCase):
         self.assertEqual(disclosure_time(fetchable), (dt(18, 0, 4), AvailabilityBasis.FIRST_FETCHABLE))
         self.assertEqual(disclosure_time(published), (dt(18, 0, 3), AvailabilityBasis.SOURCE_PUBLISHED))
 
+    def test_public_disclosure_preserves_source_product_versions_and_raw_reference(self) -> None:
+        item = evidence(
+            "precise-public",
+            EvidenceType.ASOS_T_GROUP_CURRENT,
+            observed_at=dt(18),
+            received_at=dt(18, 0, 7),
+            proven_min_f=77,
+            possible=(77,),
+            report_type="SPECI",
+            raw_payload_hash="a" * 64,
+        )
+        disclosure = to_disclosure(item)
+        self.assertIsInstance(disclosure, PublicDisclosure)
+        self.assertEqual(disclosure.source, "NOAA_AWC")
+        self.assertEqual(disclosure.product, "SPECI")
+        self.assertEqual(disclosure.source_record_ids, ("raw:precise-public",))
+        self.assertEqual(disclosure.source_payload_hash, "a" * 64)
+        self.assertEqual(disclosure.parser_version, "test-parser-v1")
+        self.assertEqual(disclosure.evidence_model_version, "test-evidence-v1")
+        self.assertEqual(disclosure.calendar_version, "lst-v1")
+        self.assertEqual(disclosure.to_dict(), to_disclosure(item).to_dict())
+
+    def test_disclosure_stream_is_deterministic_and_causal(self) -> None:
+        later = evidence(
+            "later",
+            EvidenceType.ASOS_T_GROUP_CURRENT,
+            observed_at=dt(19),
+            received_at=dt(19, 0, 5),
+            proven_min_f=76,
+        )
+        earlier = evidence(
+            "earlier",
+            EvidenceType.ASOS_T_GROUP_CURRENT,
+            observed_at=dt(18),
+            received_at=dt(18, 0, 5),
+            proven_min_f=75,
+        )
+        stream = disclosures_for_evidence([later, earlier], station_code="KLAX", climate_date=DAY)
+        self.assertEqual(tuple(item.evidence_id for item in stream), ("earlier", "later"))
+        causal = disclosures_for_evidence(
+            [later, earlier],
+            station_code="KLAX",
+            climate_date=DAY,
+            as_of=dt(18, 30),
+        )
+        self.assertEqual(tuple(item.evidence_id for item in causal), ("earlier",))
+
     def test_hidden_max_window_closes_only_when_ordinary_public_evidence_catches_up(self) -> None:
         public_current = evidence(
             "public-current-75",
@@ -211,6 +268,7 @@ class InformationVisibilityTests(unittest.TestCase):
         )
         self.assertEqual(after_release.ordinary_public.public_daily_high_min_f, 77)
         self.assertEqual(after_release.research_vs_public_gap_f, 0)
+        self.assertIsNotNone(after_release.ordinary_public.latest_six_hour_disclosure_id)
 
     def test_later_lower_temperature_cannot_reduce_public_daily_high_bound(self) -> None:
         high = evidence(
@@ -238,6 +296,8 @@ class InformationVisibilityTests(unittest.TestCase):
         self.assertEqual(state.public_daily_high_min_f, 77)
         self.assertEqual(state.latest_current_proven_min_f, 74)
         self.assertEqual(state.latest_current_observed_at, dt(19))
+        self.assertEqual(state.supporting_evidence_ids, ("high",))
+        self.assertEqual(len(state.supporting_disclosure_ids), 1)
 
     def test_late_old_report_does_not_replace_newer_public_current_observation(self) -> None:
         newer = evidence(
@@ -267,7 +327,7 @@ class InformationVisibilityTests(unittest.TestCase):
         # The delayed older observation can still prove a higher historical max.
         self.assertEqual(state.public_daily_high_min_f, 77)
 
-    def test_precise_t_group_wins_same_observation_time_over_main_field(self) -> None:
+    def test_main_and_precise_current_facts_remain_separately_inspectable(self) -> None:
         main = evidence(
             "main",
             EvidenceType.ASOS_MAIN_CURRENT,
@@ -291,6 +351,14 @@ class InformationVisibilityTests(unittest.TestCase):
             station_code="KLAX",
             climate_date=DAY,
             as_of=dt(18, 1),
+        )
+        self.assertEqual(state.latest_main_current_possible_f, (75, 76))
+        self.assertEqual(state.latest_precise_current_possible_f, (76,))
+        self.assertIsNotNone(state.latest_main_current_disclosure_id)
+        self.assertIsNotNone(state.latest_precise_current_disclosure_id)
+        self.assertNotEqual(
+            state.latest_main_current_disclosure_id,
+            state.latest_precise_current_disclosure_id,
         )
         self.assertEqual(state.latest_current_evidence_type, EvidenceType.ASOS_T_GROUP_CURRENT)
         self.assertEqual(state.latest_current_possible_f, (76,))
@@ -355,6 +423,7 @@ class InformationVisibilityTests(unittest.TestCase):
             as_of=dt(20),
         )
         self.assertEqual(forward, reverse)
+        self.assertEqual(forward.to_dict(), reverse.to_dict())
 
 
 if __name__ == "__main__":
