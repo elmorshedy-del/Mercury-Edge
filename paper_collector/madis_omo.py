@@ -1,26 +1,24 @@
 from __future__ import annotations
 
-"""MADIS OMO 1-minute source contract — transport/research only for Step 4G-A.
+"""MADIS OMO 1-minute-cadence source contract — research only for Step 4G.
 
-This module intentionally does **not** reconstruct ASOS climate temperature and
-does **not** emit benchmark-eligible settlement evidence. It defines the stable
-boundary that a future real-time MADIS/LDM transport adapter must satisfy.
+The important semantic distinction is that a MADIS ``1-minute ASOS`` record is
+an OMO *issued each minute*; its air-temperature field is not one of the hidden
+1-minute sensor averages that Mercury should average again.
 
-Official MADIS 1-minute ASOS metadata identifies air temperature as variable
-``T`` in **Kelvin** and exposes temperature sensor status as ``TSS``. OMO
-messages are binary one-minute observations and are not METARs. The adapter
-therefore preserves the MADIS value/unit exactly and does not invent a C/F
-round-trip. Any conversion/reconstruction is a separately versioned model.
+The NWS ASOS User's Guide documents the temperature pipeline as:
 
-The design keeps four concerns separate:
+sensor samples -> 1-minute average -> running 5-minute average -> whole °F ->
+nearest 0.1 °C -> OMO/METAR temperature.
 
-1. exact immutable network bytes -> ``RawSourceRecord`` (raw_journal.py);
-2. MADIS/OMO field parsing -> ``MadisOmoMinute`` here;
-3. rolling-five-minute ASOS reconstruction -> a later pure model;
-4. hard-state/elimination/execution -> existing source-neutral components.
+Thus the OMO ``T`` field represents the current ASOS running five-minute
+climate temperature reported on a one-minute cadence. MADIS stores ``T`` as
+Kelvin. Mercury still must not turn that Kelvin number directly into settlement
+proof until the MADIS storage/encoding representation is decoded through a
+versioned inverse lattice.
 
-Adding a real LDM receiver must therefore not require changes to bucket
-elimination or dead-NO execution.
+This module therefore only owns transport-decoded MADIS fields and clocks. It
+never grants benchmark authority and never performs a second rolling average.
 """
 
 from dataclasses import dataclass, field
@@ -44,9 +42,12 @@ from market_calendar import CLIMATE_CALENDAR_VERSION, climate_date
 MADIS_OMO_SOURCE = "MADIS_OMO"
 MADIS_OMO_TEMPERATURE_VARIABLE = "T"
 MADIS_OMO_TEMPERATURE_UNIT = "K"
+# The enum name reflects the source cadence/dataset name. It does NOT mean the
+# temperature value is a raw one-minute input to the ASOS five-minute average.
 MADIS_OMO_OBSERVATION_TYPE = EvidenceType.MADIS_OMO_1MIN.value
-MADIS_OMO_ADAPTER_VERSION = "madis-omo-adapter-contract-v1"
-MADIS_OMO_RESEARCH_EVIDENCE_VERSION = "madis-omo-minute-research-v1"
+MADIS_OMO_ADAPTER_VERSION = "madis-omo-adapter-contract-v2"
+MADIS_OMO_RESEARCH_EVIDENCE_VERSION = "madis-omo-wire-research-v2"
+OMO_TEMPERATURE_SEMANTICS = "asos_running_5min_average_reported_each_minute"
 
 
 class MadisMinuteStatus(str, Enum):
@@ -61,7 +62,7 @@ class MadisMinuteStatus(str, Enum):
 
 @dataclass(frozen=True)
 class MadisOmoMinute:
-    """One parsed minute sample with immutable raw provenance and causal clocks."""
+    """One OMO record on the one-minute cadence with immutable provenance."""
 
     minute_id: str
     raw_record_id: str
@@ -90,8 +91,8 @@ class MadisOmoMinute:
     @property
     def sensor_status_verified(self) -> bool:
         # MADIS note 35: TSS=0 means sensor operating/data available. A missing
-        # TSS can still be archived/researched but is not pre-cleared for any
-        # future reconstruction trust policy.
+        # TSS is preserved for exploratory research but does not qualify for the
+        # direct five-minute climate-state evidence adapter.
         return self.temperature_sensor_status == 0
 
     @property
@@ -120,29 +121,32 @@ class MadisOmoMinute:
             calendar_version=self.calendar_version,
             metadata={
                 **dict(self.metadata),
+                "source": MADIS_OMO_SOURCE,
                 "upstream_variable": self.upstream_variable,
                 "temperature_sensor_status": self.temperature_sensor_status,
                 "sensor_status_verified": self.sensor_status_verified,
                 "qc_status": self.qc_status,
                 "sequence_key": self.sequence_key,
                 "madis_minute_status": self.status.value,
+                "omo_temperature_semantics": OMO_TEMPERATURE_SEMANTICS,
                 "benchmark_eligible": False,
                 "transport": "ldm",
             },
         )
 
     def to_research_evidence(self) -> SettlementEvidence | None:
-        """Expose the sample to research/audit without granting settlement authority.
+        """Expose the raw OMO wire value without pretending Kelvin is canonical °F.
 
-        MADIS OMO is the raw observed value on the minute, while ASOS climate
-        high/low uses the rolling five-minute average stored in whole °F. A raw
-        one-minute sample therefore has no settlement lower bound by itself.
+        The OMO temperature already represents the ASOS running five-minute
+        state, but MADIS stores it in Kelvin. Until the Kelvin representation is
+        passed through the versioned inverse-lattice mapper, this raw item has no
+        canonical Fahrenheit bound.
         """
         observation = self.to_normalized_observation()
         if observation is None:
             return None
         evidence_id = _stable_id(
-            "madis-minute-research",
+            "madis-omo-wire-research",
             self.minute_id,
             MADIS_OMO_RESEARCH_EVIDENCE_VERSION,
         )
@@ -162,7 +166,7 @@ class MadisOmoMinute:
             calendar_version=self.calendar_version,
             raw_identifier=self.upstream_variable,
             possible_canonical_f=(),
-            fail_closed_reason="raw_madis_minute_is_not_settlement_climate_state",
+            fail_closed_reason="madis_omo_kelvin_requires_versioned_inverse_lattice",
             metadata=observation.metadata,
         )
 
@@ -178,8 +182,6 @@ class MadisAdapterResult:
 
     @property
     def benchmark_eligible(self) -> bool:
-        # Contract invariant for 4G-A. Promotion can only happen later through a
-        # separately versioned reconstruction/trust policy, never this adapter.
         return False
 
 
@@ -203,9 +205,8 @@ class MadisOmoSourceAdapter(Protocol):
 class ContractMadisOmoAdapter:
     """Deterministic contract over transport-decoded official MADIS fields.
 
-    A future binary/netCDF/LDM reader maps the documented MADIS ``T``/``TSS``
-    fields into this small contract. Wire decoding stays outside reconstruction,
-    so transport/schema changes cannot silently alter climate mathematics.
+    A future binary/netCDF/LDM reader maps documented MADIS ``T``/``TSS`` fields
+    into this contract. Wire decoding stays outside climate-state interpretation.
     """
 
     adapter_version = MADIS_OMO_ADAPTER_VERSION
@@ -253,8 +254,6 @@ class ContractMadisOmoAdapter:
             status = MadisMinuteStatus.QC_REJECTED
             reason = "upstream_qc_not_accepted"
         elif received < observed:
-            # Do not silently repair clocks. A real feed can exhibit clock skew;
-            # it must be measured/understood before reconstruction is trusted.
             status = MadisMinuteStatus.CLOCK_SKEW
             reason = "ldm_receipt_precedes_observation_clock"
         elif interpreted < received:
@@ -263,7 +262,7 @@ class ContractMadisOmoAdapter:
 
         day = climate_date(observed, station_timezone)
         minute_id = _stable_id(
-            "madis-minute",
+            "madis-omo-minute",
             raw_record.record_id,
             station,
             observed.isoformat(),
@@ -296,6 +295,7 @@ class ContractMadisOmoAdapter:
                 "raw_transport": raw_record.transport,
                 "official_madis_temperature_variable": MADIS_OMO_TEMPERATURE_VARIABLE,
                 "official_madis_temperature_unit": MADIS_OMO_TEMPERATURE_UNIT,
+                "omo_temperature_semantics": OMO_TEMPERATURE_SEMANTICS,
                 "source_release_to_ldm_ms": _latency_ms(raw_record.clocks.source_published_at, received),
                 "first_fetchable_to_ldm_ms": _latency_ms(raw_record.clocks.first_fetchable_at, received),
                 "observation_to_ldm_ms": _latency_ms(observed, received),
@@ -347,9 +347,6 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _qc_allows_research(value: str | None) -> bool:
-    # MADIS QC outputs can be added here once the exact field representation in
-    # the chosen LDM/netCDF path is validated. Opaque explicit failures fail
-    # closed; absence is preserved for research but is not a trust promotion.
     if value is None:
         return True
     return value.strip().lower() not in {"bad", "reject", "rejected", "failed", "invalid"}
