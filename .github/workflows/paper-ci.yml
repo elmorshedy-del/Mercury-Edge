@@ -68,3 +68,4 @@ jobs:
       - run: ./node_modules/.bin/tsx scripts/migrate.ts
       - run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/tests/013_immutable_hard_information_journal_test.sql
       - run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/tests/016_hard_state_timeline_test.sql
+      - run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/tests/017_market_data_journal_immutability_test.sql
