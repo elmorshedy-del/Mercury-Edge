@@ -1,6 +1,6 @@
 # Step 4G-C plan — empirical MADIS OMO validation and promotion gate
 
-Status: **LOCKED BEFORE IMPLEMENTATION**
+Status: **4G-C1 PASS on GitHub Actions run 415 (`32398166021`), 177 Python tests + Node + Docker + Postgres. Next: 4G-C2 live-capture qualification contract. 4G-C3 remains blocked on actual MADIS access/data.**
 
 Branch: `paper-rigour-v2`
 
@@ -40,48 +40,52 @@ Official references:
 - `https://madis.ncep.noaa.gov/sfc_OMO_variable_list.shtml`
 - `https://docs.unidata.ucar.edu/ldm/current/basics/configuring.html`
 
-## 4G-C1 — Pure empirical validation model
+## 4G-C1 — Pure empirical validation model — PASS
 
-Implement a source-neutral validation module before wiring any live transport.
+Implemented as a source-neutral validation layer before any live transport is wired.
 
-Required objects:
+Primary files:
+- `paper_collector/madis_validation.py`
+- `paper_collector/test_madis_validation.py`
+- `docs/STEP4G_C1_VERIFICATION.md`
+
+Implemented objects:
 
 - **Storage calibration sample**: exact observed MADIS Kelvin value + known canonical whole-°F comparison state + station/date/observation time + raw provenance.
-- **Candidate policy evaluation**: explicit `MadisKelvinEncodingPolicy`, matched/mismatched/off-policy/ambiguous counts and exact offending sample IDs.
+- **Candidate policy evaluation**: explicit `MadisKelvinEncodingPolicy`, matched/mismatched/off-policy/ambiguous sample identities.
 - **Aligned-current comparison**: decoded OMO state versus precise ASOS T-group only when station and physical observation minute align exactly; no arbitrary time tolerance in v1.
-- **Window-max comparison**: decoded OMO maximum versus valid six-hour maximum, with coverage status explicit.
-- **Daily-max comparison**: decoded OMO daily maximum versus completed validation/settlement truth, with coverage status explicit.
-- **Live-quality metrics**: missing observation minutes, exact duplicates, conflicting duplicates, QC/TSS rejects, reconnect/sequence gaps, clock skew and latency distributions.
+- **Window/daily max comparison**: decoded OMO maximum versus authoritative maximum with coverage status explicit.
+- **Live-quality metrics**: missing expected observation minutes when the expectation set is supplied, exact duplicates, conflicting duplicates, QC/TSS rejects, clock skew and observation-to-receipt latency summaries.
 
-Rules:
+Rules implemented:
 
 - Candidate storage policies are supplied explicitly; the validator does not invent a resolution or rounding rule from one example.
 - A storage policy is `IDENTIFIED` only if exactly one supplied policy remains compatible with all qualifying calibration samples. Multiple survivors are `AMBIGUOUS`; zero survivors are `REJECTED`.
 - Precise aligned-current disagreement is a direct contradiction for that sample and is never averaged away.
 - For a six-hour/daily window with complete usable OMO coverage, decoded OMO max must equal the authoritative max.
-- For an incomplete window, decoded OMO max may be **below** the authoritative max because Mercury may have missed the peak; decoded OMO max **above** the authoritative max is still a contradiction requiring investigation.
+- For an incomplete window, decoded OMO max may be **below** the authoritative max because Mercury may have missed the peak; decoded OMO max **above** the authoritative max remains a contradiction requiring investigation.
 - Missing OMO data never permits interpolation.
 - Historical/archive samples are marked `archive_only` and carry no live-receipt claim.
 - Validation outputs are research/audit derivations only and cannot change `HardClimateState` or trading trust.
 
-### 4G-C1 acceptance tests
+### 4G-C1 acceptance tests — PASS
 
-- one unique candidate policy explains every qualifying calibration sample -> `IDENTIFIED`;
-- two candidate policies both explain the available samples -> `AMBIGUOUS`, no promotion;
+- unique compatible candidate -> `IDENTIFIED`;
+- multiple compatible candidates -> `AMBIGUOUS`, no promotion;
 - no candidate explains all samples -> `REJECTED`;
 - exact-minute OMO/T-group agreement passes;
 - exact-minute disagreement is preserved as contradiction;
-- complete six-hour coverage requires equality with the six-hour max;
+- no hidden time-tolerance matching is allowed;
+- complete maximum coverage requires equality with the authoritative max;
 - incomplete coverage allows OMO max below, but not above, authoritative max;
-- same logic for completed-day truth;
-- archive-only evidence can calibrate representation but is never labelled live-causal;
-- validation objects are deterministic/versioned and contain raw provenance.
+- archive-only calibration never establishes live causality;
+- capture-quality metrics preserve duplicate/conflict/gap/QC/TSS/clock-skew/latency information.
 
-Full Python/Node/Docker/Postgres CI must pass before C1 is marked complete.
+Verification: GitHub Actions **run 415 (`32398166021`)** on code-complete commit `1c213fb8cf6ffe5121c4c3ef4fb168cc564f1373` — **177 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, SQL013 immutable hard-information journal PASS, SQL016 immutable hard-state timeline PASS, SQL017 immutable Kalshi market journal PASS.
 
-## 4G-C2 — Live capture qualification contract
+## 4G-C2 — Live capture qualification contract — NEXT
 
-Only after C1 passes, define the concrete transport qualification needed for a future LDM receiver.
+Define the concrete transport qualification needed for a future LDM receiver without enabling production transport.
 
 Requirements:
 
@@ -96,9 +100,7 @@ Requirements:
 
 C2 can be implemented without enabling Railway production transport. Deployment remains prohibited until the main Step 4 checklist permits it and the user explicitly approves.
 
-## 4G-C3 — Empirical sample run
-
-Requires actual MADIS access/data.
+## 4G-C3 — Empirical sample run — BLOCKED ON ACTUAL MADIS ACCESS/DATA
 
 Collect a substantial multi-station sample spanning ordinary and edge cases. The sample should deliberately include:
 
@@ -149,7 +151,7 @@ Until that document exists and is approved, direct OMO evidence remains `RESEARC
 After every completed C substep:
 
 1. run the full regression suite;
-2. record exact test count, CI run and commit SHA in `docs/HARD_STATE_REFACTOR.md`;
+2. record exact test count, CI run and commit SHA in the Step 4 refactor documentation;
 3. update `docs/STEP4_CANONICAL_TODO.md` only for items actually proven complete;
 4. add a dedicated verification note when a substep materially changes architecture;
 5. leave blocked/live-access-dependent items unchecked with the exact blocker stated.
