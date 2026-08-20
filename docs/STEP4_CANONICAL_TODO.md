@@ -8,7 +8,7 @@ PR: #5 (`WIP: hard-state evidence and paper-rigour refactor`)
 
 Safety rule: **Do not merge or deploy Step 4 until every required item and regression test below passes.**
 
-Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on GitHub Actions run 298 (92 Python tests + Node + Docker + Postgres migrations). Next implementation step: 4E.**
+Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on run 298; 4E pure elimination PASS on run 312 (103 Python tests); 4F canonical stale dead-NO paper execution PASS on run 338 (117 Python tests + Node + Docker + Postgres migrations). Next implementation step: 4G.**
 
 ## Purpose
 
@@ -150,41 +150,47 @@ Verification: GitHub Actions **run 298** — **92 Python tests passed**, collect
 
 # Step 4E — Pure bucket elimination engine
 
-- [ ] Elimination receives only:
+- [x] Elimination receives only:
   - exact Kalshi event/market strike metadata;
   - canonical hard state.
-- [ ] Elimination must not care which weather source produced the hard state.
-- [ ] Derive every mathematically impossible bucket from the proven lower bound using exact strike semantics.
-- [ ] Preserve a machine-readable proof for each eliminated bucket: bound, strike rule, evidence transition id, climate date.
-- [ ] Fail closed if strike metadata is incomplete, ambiguous, mismatched to station/date, or cannot be represented exactly.
-- [ ] Ensure no forecast probability or "likely winner" logic enters this component.
+- [x] Elimination does not care which weather source produced the hard state.
+- [x] Derive every mathematically impossible bucket from the proven lower bound using exact strike semantics.
+- [x] Preserve a machine-readable proof for each eliminated bucket: bound, strike rule, evidence transition id/context, climate date, hard-state id and event rules hash.
+- [x] Fail closed if strike metadata is incomplete, ambiguous, mismatched to station/date, or cannot be represented exactly.
+- [x] Ensure no forecast probability or "likely winner" logic enters this component.
 
 ### Step 4E acceptance tests
 
-- [ ] hard state `>= 88` eliminates every and only bucket whose maximum possible winning temperature is `< 88`.
-- [ ] boundary values are tested explicitly.
-- [ ] old Aug-18/Aug-19 wrong-date contamination is a permanent regression test.
-- [ ] exact event date + station + LST climate date must agree before elimination.
+- [x] hard state `>= 88` eliminates every and only bucket whose maximum possible winning temperature is `< 88`.
+- [x] boundary values are tested explicitly; equality to the cap remains alive and an unbounded upper tail cannot be killed by a lower-bound-only state.
+- [x] old Aug-18/Aug-19 wrong-date contamination is a permanent regression test.
+- [x] exact event date + station + LST climate date must agree before elimination.
+
+Verification: GitHub Actions **run 312** — **103 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS. `paper_collector/bucket_elimination.py` is authoritative for hardened DBN bucket death.
 
 ---
 
 # Step 4F — Active trading path: stale dead-NO only
 
-- [ ] Keep the active benchmark trade deliberately simple.
-- [ ] For each eliminated bucket, inspect the executable NO side.
-- [ ] Calculate actual executable economics from ask/depth, fees, and fill quantity.
-- [ ] Rank dead-NO opportunities mechanically by guaranteed economics and capacity; do not introduce weather forecasting.
-- [ ] Default benchmark is hold to settlement.
-- [ ] No survivor-YES basket or winner forecast is required for Step 4.
-- [ ] Multiple dead NOs are routes on the same hard-state fact, not separate weather strategies.
-- [ ] Shadow/research activity must never consume benchmark sleeve capital.
+- [x] Keep the active benchmark trade deliberately simple: canonical eliminated bucket -> executable NO -> fee-adjusted guaranteed economics -> simulated paper order/fill/position.
+- [x] For each eliminated bucket, inspect the executable NO side reconstructed from causal Kalshi L2.
+- [x] Calculate actual executable economics from ask/depth, fill quantity, fees and cash-rounding behavior; guaranteed payout/profit/ROI are stored on the order audit.
+- [x] Rank dead-NO opportunities mechanically by exact guaranteed ROI/profit/capacity; do not introduce weather forecasting.
+- [x] Default benchmark is hold to settlement; Step 4F adds no early-exit/forecast logic.
+- [x] No survivor-YES basket or winner forecast is required for Step 4.
+- [x] Multiple dead NOs are routes on the same hard-state fact, not separate weather strategies.
+- [x] Shadow/research activity remains isolated and cannot consume benchmark sleeve capital.
+- [x] Existing per-mode `max_no_price` values remain **portfolio guards only**. They are not treated as proof of edge; a fill must independently have strictly positive guaranteed net return after exact fees.
 
 ### Step 4F acceptance tests
 
-- [ ] a non-dead bucket can never produce a benchmark dead-NO order.
-- [ ] an eliminated bucket with no positive guaranteed net return after fees does not trade.
-- [ ] execution uses current executable order-book economics, not midpoint or candle proxies, when live L2 is available.
-- [ ] shadow-only configuration cannot spend benchmark cash.
+- [x] a non-dead, missing-proof or mismatched-elimination candidate is rejected before market lookup and can never produce a benchmark dead-NO order.
+- [x] an eliminated bucket with no positive guaranteed net return after exact fees/cash rounding does not trade.
+- [x] execution uses current executable order-book economics reconstructed from causal live L2; absence of L2 blocks the benchmark trade and never falls back to midpoint/candle proxies.
+- [x] shadow-only configuration cannot spend benchmark cash.
+- [x] successful paper orders link exact elimination id + hard-state transition and persist guaranteed payout/profit/ROI, actual fills, fees, L2 snapshot identity and execution-model versions.
+
+Verification: GitHub Actions **run 338** — **117 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, immutable journal/timeline tests PASS. Hardened DBN now routes benchmark execution through `paper_collector/dead_no_executor.py`; pure exact execution math lives in `paper_collector/dead_no_execution.py`.
 
 ---
 
@@ -281,7 +287,7 @@ These are non-negotiable fixtures. Add each as an automated named regression if 
 - [x] repeated evidence for the same lower bound cannot retrigger a new hard-state transition.
 - [x] later current temperature below a known max cannot reduce the bound.
 - [x] research/shadow strategies cannot spend benchmark cash.
-- [ ] incomplete/ambiguous Kalshi strike metadata cannot create an elimination. **Step 4E.**
+- [x] incomplete/ambiguous Kalshi strike metadata cannot create an elimination.
 - [ ] future MADIS missing-minute case cannot silently fabricate a settlement-compatible rolling-five-minute state. **Step 4G.**
 - [ ] future MADIS out-of-order arrival must use receipt-time causal ordering in replay. **Step 4G/J.**
 
