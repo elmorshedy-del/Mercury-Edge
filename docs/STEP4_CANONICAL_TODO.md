@@ -8,7 +8,7 @@ PR: #5 (`WIP: hard-state evidence and paper-rigour refactor`)
 
 Safety rule: **Do not merge or deploy Step 4 until every required item and regression test below passes.**
 
-Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on run 298; 4E pure elimination PASS on run 312; 4F canonical stale dead-NO paper execution PASS on run 338; 4G-A MADIS OMO source/trust contract PASS on run 352; corrected 4G-B direct OMO five-minute-state research decoding PASS on run 399 (165 Python tests + Node + Docker + Postgres). Next implementation substep: 4G-C empirical MADIS/live-feed validation; information-visibility/market-reaction work remains a raw-first derived layer, not a trading-policy complication.**
+Verified progress: **4A PASS; 4B PASS; 4C live current/T/six-hour core PASS with the 24-hour channel deliberately fail-closed/deferred; 4D PASS on run 298; 4E pure elimination PASS on run 312; 4F canonical stale dead-NO paper execution PASS on run 338; 4G-A MADIS OMO source/trust contract PASS on run 352; corrected 4G-B direct OMO five-minute-state research decoding PASS on run 399; 4G-C1 empirical-validation framework PASS on run 415 (177 Python tests); 4G-C2 live/archive transport qualification contract PASS on run 431 (186 Python tests + Node + Docker + Postgres including immutable transport-event regression). 4G-C3 remains blocked on actual MADIS data/live access and needs the 4H validation/settlement truth layer for full completed-day comparison. Next unblocked checklist substep: 4H DSM/CLI/settlement auditor. 4G remains incomplete and no MADIS evidence is benchmark-promoted.**
 
 ## Purpose
 
@@ -199,14 +199,14 @@ Verification: GitHub Actions **run 338** — **117 Python tests passed**, Python
 MADIS OMO is a planned earlier information channel. The dataset is one-minute cadence, but authoritative ASOS documentation establishes that OMO air temperature is already the ASOS running five-minute climate temperature reported each minute. Mercury therefore decodes the OMO state directly and **does not re-average five OMO records**.
 
 - [x] **4G-A:** Define a `MADIS_OMO_1MIN` source adapter contract without making it benchmark-eligible. The enum retains the dataset/cadence name; the adapter preserves official MADIS `T` in Kelvin, `TSS`, immutable raw provenance and separate clocks. Raw OMO wire evidence is `RESEARCH_ONLY` and cannot raise benchmark hard state.
-- [ ] Preserve raw MADIS/LDM records and receipt ordering exactly when live access becomes available. **Storage contract is already compatible through the generic immutable raw journal; actual LDM transport remains pending access/feed details.**
+- [ ] Preserve raw MADIS/LDM records and receipt ordering exactly when live access becomes available. **C2 now defines and tests the required exact-byte/live-receipt contract and immutable continuity-event journal, but the actual LDM network feed remains pending MADIS access.**
 - [x] **4G-B:** Correctly model OMO temperature as an ASOS running-five-minute state on a one-minute cadence, then decode `T(K)` through a versioned inverse lattice: canonical whole °F -> documented ASOS 0.1°C OMO encoding -> Kelvin -> configured MADIS storage representation. Unique direct states can become `RESEARCH_ONLY` evidence; no second rolling average is permitted.
-- [x] MADIS source/decoding boundaries are architecturally isolated from bucket elimination and dead-NO execution; 4G-A/B required no changes to either component.
-- [x] Direct research decoding explicitly handles missing observations without interpolation, exact duplicates idempotently, late/out-of-order arrival causally, conflicting same-minute values fail-closed, QC status, and verified `TSS=0`. **Live reconnect/sequence-gap distributions remain part of 4G-C transport validation.**
-- [x] The source contract records observation time -> source/MADIS release time if available -> first-fetchability if available -> LDM/Mercury receipt -> Mercury interpretation latency. **Actual live latency distributions remain pending feed access.**
-- [ ] **4G-C:** Before promotion to benchmark evidence, empirically establish the actual MADIS Kelvin storage/rounding representation and validate direct OMO states/maxima over a substantial sample against precise T-groups, valid six-hour maxima, completed DSM, CLI, and settlement outcomes.
+- [x] MADIS source/decoding boundaries are architecturally isolated from bucket elimination and dead-NO execution; 4G-A/B/C1/C2 required no changes to either component.
+- [x] Direct research decoding explicitly handles missing observations without interpolation, exact duplicates idempotently, late/out-of-order arrival causally, conflicting same-minute values fail-closed, QC status, and verified `TSS=0`. C2 additionally makes reconnect/sequence/queue gaps explicit immutable transport events.
+- [x] The source/transport contracts preserve observation time -> source/MADIS release time if available -> first-fetchability if actually live/measurable -> LDM/Mercury receipt -> Mercury interpretation latency. Archive imports cannot populate the canonical live `first_fetchable_at` merely from historical metadata. **Actual live latency distributions remain pending feed access.**
+- [ ] **4G-C:** Empirical promotion gate. **C1 PASS:** source-neutral storage-policy/current/max/quality validator. **C2 PASS:** live-vs-archive exact-byte transport qualification contract. **C3 still required:** actual multi-station MADIS sample to establish storage representation, live causality/latency and agreement against precise T-groups, valid six-hour maxima, completed DSM, CLI and settlement outcomes. **C4 remains prohibited until C3 evidence exists.**
 - [x] Promotion from research/validation to hard-state eligible is structurally a separately versioned trust-policy change. Raw OMO and direct B2 evidence remain non-benchmark until explicit empirical promotion.
-- [ ] Historical archive availability must never be treated as contemporaneous live availability in replay.
+- [ ] Historical archive availability must never be treated as contemporaneous live availability in replay. **C2 structurally labels archive imports non-live and strips archive-only fetchability from the canonical live clock; the end-to-end replay leakage regression remains 4J.**
 
 ### Step 4G acceptance tests/scaffolding
 
@@ -214,13 +214,19 @@ MADIS OMO is a planned earlier information channel. The dataset is one-minute ca
 - [x] a synthetic OMO state is decoded deterministically through the documented whole-°F -> 0.1°C -> Kelvin source lattice plus explicit MADIS storage policy.
 - [x] missing OMO minutes cannot create/interpolate a state; conflicting same-minute states fail closed; late/out-of-order observations remain knowable only at actual Mercury receipt/interpretation time.
 - [x] direct OMO five-minute evidence remains `RESEARCH_ONLY` and cannot alter benchmark hard state.
-- [ ] replay respects actual receipt time and live-capture availability, never future archive knowledge. **4G-C/J.**
+- [x] archive calibration cannot claim live causality; live and archive captures use distinct transport origins/streams and exact raw bytes must be persisted before parsing.
+- [x] reconnect/sequence/queue coverage gaps have deterministic immutable transport-event records rather than disappearing from replay provenance.
+- [ ] replay respects actual receipt time and live-capture availability, never future archive knowledge. **4J end-to-end regression still required.**
 
 4G-A verification: GitHub Actions **run 352** — **131 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, immutable journal/timeline tests PASS. See `docs/STEP4G_A_VERIFICATION.md`.
 
 Corrected 4G-B verification: GitHub Actions **run 399 (`32395889553`)** — **165 Python tests passed**, Python compile PASS, collector Docker PASS, Node PASS, full Postgres migrations PASS, immutable weather/evidence journal PASS, immutable hard-state timeline PASS, immutable Kalshi market journal PASS. See `docs/STEP4G_B_PLAN.md` and `docs/INFORMATION_VISIBILITY_VERIFICATION.md`.
 
-No MADIS evidence is benchmark eligible yet.
+4G-C1 verification: GitHub Actions **run 415 (`32398166021`)** — **177 Python tests passed**, compile/Docker/Node/Postgres PASS. See `docs/STEP4G_C1_VERIFICATION.md`.
+
+4G-C2 verification: GitHub Actions **run 431 (`32398894745`)** — **186 Python tests passed**, compile/Docker/Node/Postgres PASS, including SQL018 immutable source-transport-event regression. See `docs/STEP4G_C2_VERIFICATION.md`.
+
+**4G remains incomplete.** No MADIS evidence is benchmark eligible yet. C3 is blocked on actual MADIS access/data; 4H is now the next unblocked checklist work and also supplies completed-day validation truth needed by C3.
 
 ---
 
@@ -297,7 +303,8 @@ These are non-negotiable fixtures. Add each as an automated named regression if 
 - [x] incomplete/ambiguous Kalshi strike metadata cannot create an elimination.
 - [x] MADIS OMO missing-minute case cannot silently fabricate/interpolate a climate state; directly received OMO states stand alone.
 - [x] MADIS late/out-of-order arrival uses Mercury receipt/interpretation causality and is never backdated to the physical observation timestamp.
-- [ ] historical MADIS/archive replay must prove that future archive availability cannot leak into an earlier causal state. **4G-C/J.**
+- [x] archive/import transport cannot masquerade as live MADIS causality or populate a canonical live first-fetchable clock.
+- [ ] historical MADIS/archive replay must prove that future archive availability cannot leak into an earlier causal state. **4J.**
 
 ---
 
@@ -352,12 +359,12 @@ Each hypothesis should eventually have status such as `UNTESTED`, `SUPPORTED`, `
 
 # Engineering rules for every Step 4 commit
 
-- [ ] Work strictly in checklist order unless a failing test forces a documented dependency change.
+- [ ] Work strictly in checklist order unless a failing test or external dependency forces a documented dependency change.
 - [ ] One coherent architectural change per commit where practical.
 - [ ] Add/modify tests in the same commit or immediately following test commit.
 - [ ] Run targeted tests first.
 - [ ] Run the complete Python/Node/Docker CI suite after each completed substep.
-- [ ] Record exact test count/result and commit SHA in `docs/HARD_STATE_REFACTOR.md`.
-- [ ] Update this TODO by checking completed items only after tests pass.
+- [ ] Record exact test count/result and commit SHA in `docs/HARD_STATE_REFACTOR.md` or the dedicated Step 4 verification document referenced by this canonical TODO, then consolidate before final Step 4 completion.
+- [x] Update this TODO by checking completed items only after tests pass. **C1/C2 were marked only after runs 415/431 were green.**
 - [ ] Any newly discovered architectural assumption or external-source ambiguity must be written into this file before implementing around it.
 - [ ] Do not merge PR #5 or deploy Railway during Step 4 without explicit approval after the whole Step 4 checklist passes.
