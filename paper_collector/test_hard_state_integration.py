@@ -114,7 +114,7 @@ class DbnProofIntegrationTests(unittest.TestCase):
         patches = self.common_patches(proof, [event(cap=87)])
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
              patch.object(dbn.base, "insert_signal") as insert_signal, \
-             patch.object(dbn.base, "execute_candidates") as execute:
+             patch.object(dbn.dead_no_executor, "execute_candidates") as execute:
             count = dbn.process_weather(conn, weather(decoded_temp=Decimal("87.8")))
         self.assertEqual(count, 0)
         insert_signal.assert_not_called()
@@ -127,7 +127,7 @@ class DbnProofIntegrationTests(unittest.TestCase):
         captured = []
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
              patch.object(dbn.base, "insert_signal", return_value=(41, "approved")) as insert_signal, \
-             patch.object(dbn.base, "execute_candidates", side_effect=lambda _c, candidates, _m, _g: captured.extend(candidates)):
+             patch.object(dbn.dead_no_executor, "execute_candidates", side_effect=lambda _c, candidates, _m, _g: captured.extend(candidates)):
             count = dbn.process_weather(conn, weather(decoded_temp=Decimal("87.0")))
         self.assertEqual(count, 1)
         self.assertEqual(insert_signal.call_args.kwargs["confirmed_high"], Decimal("88"))
