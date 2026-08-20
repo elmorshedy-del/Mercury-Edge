@@ -6,6 +6,8 @@ Branch: `paper-rigour-v2`
 
 PR: #5
 
+Cross-cutting data contract: **all Step 4G work must comply with `docs/INFORMATION_VISIBILITY_ARCHITECTURE_TODO.md`.** In particular, raw source records remain immutable and complete; MADIS parsing/reconstruction is a replaceable derivation so future public-visibility, market-reaction and alternative reconstruction models can be rebuilt without recollecting source data.
+
 ## Why 4G-B is split again
 
 The official MADIS OMO contract gives Mercury temperature variable `T` in Kelvin, while the ASOS climate pipeline ultimately depends on one-minute whole-°F values and rolling five-minute averaging. The exact quantization/resolution of the MADIS-delivered Kelvin representation must not be guessed.
