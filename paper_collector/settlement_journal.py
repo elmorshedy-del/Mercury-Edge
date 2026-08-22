@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import psycopg
 
 from raw_journal import canonical_json_bytes, sha256_hex
+from settlement_audit_domain import ExchangeMarketSettlement
 from settlement_validation import AuthoritativeSettlement, ValidationProduct
 
 SETTLEMENT_JOURNAL_VERSION = "settlement-journal-v1"
@@ -26,6 +27,7 @@ class SettlementAuditResult:
     climate_date: date
     settlement_id: str | None = None
     validation_id: str | None = None
+    exchange_settlement_id: str | None = None
     state_id: str | None = None
     elimination_id: str | None = None
     order_id: int | None = None
@@ -38,8 +40,8 @@ class SettlementAuditResult:
             raise ValueError("unsupported settlement audit severity")
         if self.status not in {"pass", "discrepancy", "invariant_failure"}:
             raise ValueError("unsupported settlement audit status")
-        if not self.settlement_id and not self.validation_id:
-            raise ValueError("settlement audit requires settlement_id or validation_id")
+        if not self.settlement_id and not self.validation_id and not self.exchange_settlement_id:
+            raise ValueError("settlement audit requires a settlement, validation or exchange-settlement source")
         if not self.finding_code.strip():
             raise ValueError("settlement audit finding_code is required")
         if not self.station_code.strip():
@@ -53,6 +55,7 @@ class SettlementAuditResult:
             self.session_id,
             self.settlement_id or "",
             self.validation_id or "",
+            self.exchange_settlement_id or "",
             self.finding_code,
             self.station_code,
             self.climate_date.isoformat(),
@@ -74,6 +77,7 @@ class SettlementAuditResult:
             "climate_date": self.climate_date.isoformat(),
             "settlement_id": self.settlement_id,
             "validation_id": self.validation_id,
+            "exchange_settlement_id": self.exchange_settlement_id,
             "state_id": self.state_id,
             "elimination_id": self.elimination_id,
             "order_id": self.order_id,
@@ -119,28 +123,14 @@ def persist_validation_product(
         ON CONFLICT (validation_id) DO NOTHING
         """,
         (
-            product.validation_id,
-            session_id,
-            product.source,
-            product.source_product_id,
-            product.station_code,
-            product.climate_date,
-            product.reported_max_f,
-            product.max_observed_at,
-            product.issued_at,
-            product.mercury_received_at,
-            raw_source_id,
-            product.source_payload_sha256,
-            product.lifecycle.value,
-            product.authority.value,
-            product.corrected,
-            product.revision_of,
-            product.parser_version,
-            product.validation_model_version,
-            product.calendar_version,
-            product.fail_closed_reason,
-            canonical.decode("utf-8"),
-            digest,
+            product.validation_id, session_id, product.source, product.source_product_id,
+            product.station_code, product.climate_date, product.reported_max_f,
+            product.max_observed_at, product.issued_at, product.mercury_received_at,
+            raw_source_id, product.source_payload_sha256, product.lifecycle.value,
+            product.authority.value, product.corrected, product.revision_of,
+            product.parser_version, product.validation_model_version,
+            product.calendar_version, product.fail_closed_reason,
+            canonical.decode("utf-8"), digest,
         ),
     )
     existing = conn.execute(
@@ -189,25 +179,13 @@ def persist_authoritative_settlement(
         ON CONFLICT (settlement_id) DO NOTHING
         """,
         (
-            settlement.settlement_id,
-            truth.truth_id,
-            session_id,
-            settlement.event_ticker,
-            truth.station_code,
-            truth.climate_date,
-            truth.final_max_f,
-            truth.source,
-            raw_source_id,
-            settlement.rules_hash,
-            settlement.rule_source_name,
-            settlement.settlement_source_name,
-            settlement.authority.value,
-            truth.observed_or_issued_at,
-            truth.revision_of,
-            truth.truth_model_version,
-            settlement.parser_version,
-            canonical.decode("utf-8"),
-            digest,
+            settlement.settlement_id, truth.truth_id, session_id,
+            settlement.event_ticker, truth.station_code, truth.climate_date,
+            truth.final_max_f, truth.source, raw_source_id, settlement.rules_hash,
+            settlement.rule_source_name, settlement.settlement_source_name,
+            settlement.authority.value, truth.observed_or_issued_at,
+            truth.revision_of, truth.truth_model_version, settlement.parser_version,
+            canonical.decode("utf-8"), digest,
         ),
     )
     existing = conn.execute(
@@ -217,6 +195,58 @@ def persist_authoritative_settlement(
     if not existing or str(existing[0]) != digest:
         raise RuntimeError("authoritative settlement collision or non-deterministic recomputation")
     return settlement.settlement_id
+
+
+def persist_exchange_market_settlement(
+    conn: psycopg.Connection[Any],
+    *,
+    session_id: str,
+    settlement: ExchangeMarketSettlement,
+    raw_source_id: int,
+) -> str:
+    raw = _verify_raw_source(
+        conn,
+        session_id=session_id,
+        raw_source_id=raw_source_id,
+        expected_record_id=settlement.source_record_id,
+        station_code=settlement.station_code,
+        expected_payload_sha256=settlement.source_payload_sha256,
+    )
+    payload = {
+        "journal_version": SETTLEMENT_JOURNAL_VERSION,
+        "raw_source_payload_sha256": raw[2],
+        "exchange_market_settlement": settlement.to_dict(),
+    }
+    canonical = canonical_json_bytes(payload)
+    digest = sha256_hex(canonical)
+    market_results = canonical_json_bytes(
+        [item.to_dict() for item in settlement.market_results]
+    ).decode("utf-8")
+    conn.execute(
+        """
+        INSERT INTO exchange_market_settlements(
+          exchange_settlement_id,session_id,event_ticker,station_code,climate_date,
+          raw_source_id,rules_hash,rule_source_name,captured_at,market_results,
+          parser_version,settlement_payload,settlement_sha256
+        ) VALUES (
+          %s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s
+        )
+        ON CONFLICT (exchange_settlement_id) DO NOTHING
+        """,
+        (
+            settlement.exchange_settlement_id, session_id, settlement.event_ticker,
+            settlement.station_code, settlement.climate_date, raw_source_id,
+            settlement.rules_hash, settlement.rule_source_name, settlement.captured_at,
+            market_results, settlement.parser_version, canonical.decode("utf-8"), digest,
+        ),
+    )
+    existing = conn.execute(
+        "SELECT settlement_sha256 FROM exchange_market_settlements WHERE exchange_settlement_id=%s",
+        (settlement.exchange_settlement_id,),
+    ).fetchone()
+    if not existing or str(existing[0]) != digest:
+        raise RuntimeError("exchange settlement collision or non-deterministic recomputation")
+    return settlement.exchange_settlement_id
 
 
 def persist_settlement_audit_result(
@@ -233,32 +263,23 @@ def persist_settlement_audit_result(
     conn.execute(
         """
         INSERT INTO settlement_audit_results(
-          audit_id,session_id,settlement_id,validation_id,severity,status,
-          finding_code,station_code,climate_date,state_id,elimination_id,
-          order_id,market_ticker,auditor_version,details,audit_payload,audit_sha256
+          audit_id,session_id,settlement_id,validation_id,exchange_settlement_id,
+          severity,status,finding_code,station_code,climate_date,state_id,
+          elimination_id,order_id,market_ticker,auditor_version,details,
+          audit_payload,audit_sha256
         ) VALUES (
-          %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s
+          %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s
         )
         ON CONFLICT (audit_id) DO NOTHING
         """,
         (
-            result.audit_id,
-            result.session_id,
-            result.settlement_id,
-            result.validation_id,
-            result.severity,
-            result.status,
-            result.finding_code,
-            result.station_code,
-            result.climate_date,
-            result.state_id,
-            result.elimination_id,
-            result.order_id,
-            result.market_ticker,
-            result.auditor_version,
+            result.audit_id, result.session_id, result.settlement_id,
+            result.validation_id, result.exchange_settlement_id, result.severity,
+            result.status, result.finding_code, result.station_code,
+            result.climate_date, result.state_id, result.elimination_id,
+            result.order_id, result.market_ticker, result.auditor_version,
             canonical_json_bytes(dict(result.details)).decode("utf-8"),
-            canonical.decode("utf-8"),
-            digest,
+            canonical.decode("utf-8"), digest,
         ),
     )
     existing = conn.execute(
