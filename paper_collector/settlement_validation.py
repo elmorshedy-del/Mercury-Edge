@@ -2,10 +2,9 @@ from __future__ import annotations
 
 """Step 4H validation/settlement lifecycle normalization.
 
-This module is deliberately source/lifecycle oriented and has no trading logic.
-NWS DSM/CLI products are validation inputs only. Authoritative contract
-settlement is constructed separately and only with explicit event/rule-source
-provenance.
+NWS DSM/CLI products are validation-only. Authoritative contract settlement is
+constructed separately and only with explicit event/date/rule-source provenance.
+No function in this module creates benchmark-eligible weather evidence.
 """
 
 from dataclasses import dataclass, field
@@ -78,8 +77,7 @@ class ValidationProduct:
     @property
     def accepted_validation(self) -> bool:
         return (
-            self.lifecycle
-            in {
+            self.lifecycle in {
                 ValidationLifecycle.CURRENT_DAY_PRELIMINARY,
                 ValidationLifecycle.COMPLETED_DAY_PRELIMINARY,
             }
@@ -114,15 +112,15 @@ class ValidationProduct:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ValidationProduct":
-        raw_date = value.get("climate_date")
+        raw_day = value.get("climate_date")
         return cls(
             validation_id=str(value["validation_id"]),
             source=str(value["source"]),
             source_product_id=str(value["source_product_id"]),
             station_code=str(value["station_code"]),
-            climate_date=date.fromisoformat(str(raw_date)) if raw_date else None,
-            reported_max_f=(int(value["reported_max_f"]) if value.get("reported_max_f") is not None else None),
-            max_observed_at=_dt(value.get("max_observed_at")),
+            climate_date=date.fromisoformat(str(raw_day)) if raw_day else None,
+            reported_max_f=int(value["reported_max_f"]) if value.get("reported_max_f") is not None else None,
+            max_observed_at=_optional_dt(value.get("max_observed_at")),
             issued_at=_required_dt(value["issued_at"]),
             mercury_received_at=_required_dt(value["mercury_received_at"]),
             source_record_id=str(value["source_record_id"]),
@@ -133,32 +131,34 @@ class ValidationProduct:
             validation_model_version=str(value.get("validation_model_version", VALIDATION_MODEL_VERSION)),
             calendar_version=str(value.get("calendar_version", CLIMATE_CALENDAR_VERSION)),
             corrected=bool(value.get("corrected", False)),
-            revision_of=(str(value["revision_of"]) if value.get("revision_of") is not None else None),
-            fail_closed_reason=(str(value["fail_closed_reason"]) if value.get("fail_closed_reason") else None),
+            revision_of=str(value["revision_of"]) if value.get("revision_of") else None,
+            fail_closed_reason=str(value["fail_closed_reason"]) if value.get("fail_closed_reason") else None,
             metadata=dict(value.get("metadata") or {}),
         )
 
     def to_validation_evidence(self) -> SettlementEvidence:
+        """Represent a validation fact without granting hard-state authority."""
         evidence_type = EvidenceType.DSM_MAX if self.source == "NWS_DSM" else EvidenceType.CLI_MAX
         usable = self.accepted_validation
-        integrity = IntegrityStatus.CANONICAL if usable else IntegrityStatus.INCOMPLETE
-        trust = EvidenceTrust.VALIDATION_ONLY if usable else EvidenceTrust.REJECTED
-        evidence_id = _stable_id(
-            "validation-evidence",
-            self.validation_id,
-            self.validation_model_version,
-            self.parser_version,
+        target_day = self.climate_date or climate_date(
+            self.issued_at,
+            str(self.metadata.get("timezone_name") or "UTC"),
         )
         return SettlementEvidence(
-            evidence_id=evidence_id,
+            evidence_id=_stable_id(
+                "validation-evidence",
+                self.validation_id,
+                self.validation_model_version,
+                self.parser_version,
+            ),
             evidence_type=evidence_type,
             station_code=self.station_code,
-            climate_date=self.climate_date or climate_date(self.issued_at, str(self.metadata.get("timezone_name") or "UTC")),
+            climate_date=target_day,
             source_record_ids=(self.source_record_id,),
             proven_min_f=self.reported_max_f if usable else None,
             proven_max_f=self.reported_max_f if usable else None,
-            integrity_status=integrity,
-            trust=trust,
+            integrity_status=IntegrityStatus.CANONICAL if usable else IntegrityStatus.INCOMPLETE,
+            trust=EvidenceTrust.VALIDATION_ONLY if usable else EvidenceTrust.REJECTED,
             clocks=SourceClocks(
                 observed_at=self.max_observed_at or self.issued_at,
                 source_published_at=self.issued_at,
@@ -170,7 +170,7 @@ class ValidationProduct:
             evidence_model_version=self.validation_model_version,
             calendar_version=self.calendar_version,
             raw_identifier=self.source_product_id,
-            possible_canonical_f=((self.reported_max_f,) if usable and self.reported_max_f is not None else ()),
+            possible_canonical_f=(self.reported_max_f,) if usable and self.reported_max_f is not None else (),
             fail_closed_reason=self.fail_closed_reason,
             metadata={
                 "validation_only": True,
@@ -225,7 +225,6 @@ _DSM_LINE_RE_TEMPLATE = (
     r"(?P<day>\d{{2}})/(?P<month>\d{{2}})\s+"
     r"(?P<high>M?\d{{2,3}})(?P<high_time>\d{{4}})/"
 )
-
 _CLI_DATE_RE = re.compile(
     r"(?im)\bCLIMATE\s+SUMMARY\s+FOR\s+"
     r"(?P<month>JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+"
@@ -233,18 +232,12 @@ _CLI_DATE_RE = re.compile(
 )
 _CLI_MAX_RE = re.compile(r"(?im)^\s*MAXIMUM\s+(?P<high>M?-?\d{1,3})\b")
 _MONTHS = {
-    "JANUARY": 1,
-    "FEBRUARY": 2,
-    "MARCH": 3,
-    "APRIL": 4,
-    "MAY": 5,
-    "JUNE": 6,
-    "JULY": 7,
-    "AUGUST": 8,
-    "SEPTEMBER": 9,
-    "OCTOBER": 10,
-    "NOVEMBER": 11,
-    "DECEMBER": 12,
+    name: idx
+    for idx, name in enumerate(
+        ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+         "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"),
+        start=1,
+    )
 }
 
 
@@ -261,30 +254,28 @@ def parse_nws_dsm(
     revision_of: str | None = None,
 ) -> ValidationProduct:
     station = station_code.strip().upper()
-    pattern = re.compile(_DSM_LINE_RE_TEMPLATE.format(station=re.escape(station)))
-    match = pattern.search(raw_text)
-    base = {
-        "source": "NWS_DSM",
-        "source_product_id": source_product_id,
-        "station_code": station,
-        "issued_at": issued_at,
-        "mercury_received_at": mercury_received_at,
-        "source_record_id": source_record_id,
-        "source_payload_sha256": source_payload_sha256,
-        "authority": ValidationAuthority.CORROBORATION_ONLY,
-        "parser_version": DSM_PARSER_VERSION,
-        "revision_of": revision_of,
-        "metadata": {"timezone_name": timezone_name},
-    }
+    common = _common(
+        source="NWS_DSM",
+        source_product_id=source_product_id,
+        station_code=station,
+        issued_at=issued_at,
+        mercury_received_at=mercury_received_at,
+        source_record_id=source_record_id,
+        source_payload_sha256=source_payload_sha256,
+        parser_version=DSM_PARSER_VERSION,
+        revision_of=revision_of,
+    )
+    match = re.compile(_DSM_LINE_RE_TEMPLATE.format(station=re.escape(station))).search(raw_text)
     if not match:
-        return _validation_product(
-            **base,
+        return _product(
+            **common,
             climate_day=None,
             reported_max_f=None,
             max_observed_at=None,
             lifecycle=ValidationLifecycle.REJECTED,
             corrected=False,
             fail_closed_reason="dsm_station_summary_line_not_parseable",
+            metadata={"timezone_name": timezone_name},
         )
 
     try:
@@ -300,39 +291,31 @@ def parse_nws_dsm(
             timezone_name=timezone_name,
         )
     except (TypeError, ValueError):
-        return _validation_product(
-            **base,
+        return _product(
+            **common,
             climate_day=None,
             reported_max_f=None,
             max_observed_at=None,
             lifecycle=ValidationLifecycle.REJECTED,
             corrected=bool(match.group("cor")),
             fail_closed_reason="dsm_date_temperature_or_time_invalid",
+            metadata={"timezone_name": timezone_name},
         )
 
-    issued_climate_day = climate_date(issued_at, timezone_name)
+    issue_day = climate_date(issued_at, timezone_name)
     if cutoff is not None:
-        lifecycle = (
-            ValidationLifecycle.CURRENT_DAY_PRELIMINARY
-            if target <= issued_climate_day
-            else ValidationLifecycle.AMBIGUOUS
-        )
+        lifecycle = ValidationLifecycle.CURRENT_DAY_PRELIMINARY if target <= issue_day else ValidationLifecycle.AMBIGUOUS
         fail_reason = None if lifecycle is ValidationLifecycle.CURRENT_DAY_PRELIMINARY else "dsm_partial_target_after_issue_climate_date"
     else:
-        lifecycle = (
-            ValidationLifecycle.COMPLETED_DAY_PRELIMINARY
-            if target < issued_climate_day
-            else ValidationLifecycle.AMBIGUOUS
-        )
+        lifecycle = ValidationLifecycle.COMPLETED_DAY_PRELIMINARY if target < issue_day else ValidationLifecycle.AMBIGUOUS
         fail_reason = None if lifecycle is ValidationLifecycle.COMPLETED_DAY_PRELIMINARY else "dsm_completed_form_not_for_prior_climate_date"
 
     start_utc, _ = climate_day_bounds(target, timezone_name)
-    max_at = start_utc + timedelta(hours=high_hour, minutes=high_minute)
-    return _validation_product(
-        **base,
+    return _product(
+        **common,
         climate_day=target,
         reported_max_f=high_f,
-        max_observed_at=max_at,
+        max_observed_at=start_utc + timedelta(hours=high_hour, minutes=high_minute),
         lifecycle=lifecycle,
         corrected=bool(match.group("cor")),
         fail_closed_reason=fail_reason,
@@ -357,40 +340,29 @@ def parse_nws_cli(
     revision_of: str | None = None,
 ) -> ValidationProduct:
     station = station_code.strip().upper()
+    common = _common(
+        source="NWS_CLI",
+        source_product_id=source_product_id,
+        station_code=station,
+        issued_at=issued_at,
+        mercury_received_at=mercury_received_at,
+        source_record_id=source_record_id,
+        source_payload_sha256=source_payload_sha256,
+        parser_version=CLI_PARSER_VERSION,
+        revision_of=revision_of,
+    )
     date_match = _CLI_DATE_RE.search(raw_text)
     high_match = _CLI_MAX_RE.search(raw_text)
-    base = {
-        "source": "NWS_CLI",
-        "source_product_id": source_product_id,
-        "station_code": station,
-        "issued_at": issued_at,
-        "mercury_received_at": mercury_received_at,
-        "source_record_id": source_record_id,
-        "source_payload_sha256": source_payload_sha256,
-        "authority": ValidationAuthority.CORROBORATION_ONLY,
-        "parser_version": CLI_PARSER_VERSION,
-        "revision_of": revision_of,
-        "metadata": {"timezone_name": timezone_name},
-    }
-    if not date_match:
-        return _validation_product(
-            **base,
+    if not date_match or not high_match:
+        return _product(
+            **common,
             climate_day=None,
             reported_max_f=None,
             max_observed_at=None,
             lifecycle=ValidationLifecycle.REJECTED,
             corrected=False,
-            fail_closed_reason="cli_explicit_report_date_missing",
-        )
-    if not high_match:
-        return _validation_product(
-            **base,
-            climate_day=None,
-            reported_max_f=None,
-            max_observed_at=None,
-            lifecycle=ValidationLifecycle.REJECTED,
-            corrected=False,
-            fail_closed_reason="cli_maximum_missing",
+            fail_closed_reason=("cli_explicit_report_date_missing" if not date_match else "cli_maximum_missing"),
+            metadata={"timezone_name": timezone_name},
         )
 
     try:
@@ -401,35 +373,34 @@ def parse_nws_cli(
         )
         high_f = _signed_int(high_match.group("high"))
     except (KeyError, TypeError, ValueError):
-        return _validation_product(
-            **base,
+        return _product(
+            **common,
             climate_day=None,
             reported_max_f=None,
             max_observed_at=None,
             lifecycle=ValidationLifecycle.REJECTED,
             corrected=False,
             fail_closed_reason="cli_date_or_maximum_invalid",
+            metadata={"timezone_name": timezone_name},
         )
 
     issue_day = climate_date(issued_at, timezone_name)
     if target < issue_day:
-        lifecycle = ValidationLifecycle.COMPLETED_DAY_PRELIMINARY
-        fail_reason = None
+        lifecycle, fail_reason = ValidationLifecycle.COMPLETED_DAY_PRELIMINARY, None
     elif target == issue_day:
-        lifecycle = ValidationLifecycle.CURRENT_DAY_PRELIMINARY
-        fail_reason = None
+        lifecycle, fail_reason = ValidationLifecycle.CURRENT_DAY_PRELIMINARY, None
     else:
-        lifecycle = ValidationLifecycle.AMBIGUOUS
-        fail_reason = "cli_target_after_issue_climate_date"
+        lifecycle, fail_reason = ValidationLifecycle.AMBIGUOUS, "cli_target_after_issue_climate_date"
 
-    return _validation_product(
-        **base,
+    return _product(
+        **common,
         climate_day=target,
         reported_max_f=high_f,
         max_observed_at=None,
         lifecycle=lifecycle,
         corrected=False,
         fail_closed_reason=fail_reason,
+        metadata={"timezone_name": timezone_name},
     )
 
 
@@ -450,32 +421,24 @@ def build_authoritative_settlement(
     event_day = event_trade_date(event_ticker)
     if event_day is None or event_day != climate_day:
         raise ValueError("event ticker date does not match settlement climate date")
-    if not station_code.strip():
+    station = station_code.strip().upper()
+    if not station:
         raise ValueError("station code is required")
     if not rules_hash.strip():
         raise ValueError("rules hash is required")
-
     authority = ValidationAuthority.EXCHANGE_RESULT if exchange_result else ValidationAuthority.CONTRACT_AUTHORITATIVE
     if not exchange_result and _source_key(rule_source_name) != _source_key(settlement_source_name):
         raise ValueError("settlement source does not match captured rule source")
 
     truth_id = _stable_id(
-        "settlement-truth",
-        event_ticker,
-        station_code.upper(),
-        climate_day.isoformat(),
-        str(final_max_f),
-        source_record_id,
-        rules_hash,
-        rule_source_name,
-        settlement_source_name,
-        authority.value,
-        SETTLEMENT_AUTHORITY_VERSION,
+        "settlement-truth", event_ticker, station, climate_day.isoformat(),
+        str(int(final_max_f)), source_record_id, rules_hash, rule_source_name,
+        settlement_source_name, authority.value, SETTLEMENT_AUTHORITY_VERSION,
     )
     truth = SettlementTruth(
         truth_id=truth_id,
-        source=("KALSHI_EXCHANGE_RESULT" if exchange_result else settlement_source_name),
-        station_code=station_code.upper(),
+        source="KALSHI_EXCHANGE_RESULT" if exchange_result else settlement_source_name,
+        station_code=station,
         climate_date=climate_day,
         final_max_f=int(final_max_f),
         status="authoritative_final",
@@ -484,9 +447,8 @@ def build_authoritative_settlement(
         truth_model_version=SETTLEMENT_AUTHORITY_VERSION,
         revision_of=revision_of,
     )
-    settlement_id = _stable_id("authoritative-settlement", truth_id, event_ticker, rules_hash)
     return AuthoritativeSettlement(
-        settlement_id=settlement_id,
+        settlement_id=_stable_id("authoritative-settlement", truth_id, event_ticker, rules_hash),
         event_ticker=event_ticker,
         rules_hash=rules_hash,
         rule_source_name=rule_source_name,
@@ -496,38 +458,39 @@ def build_authoritative_settlement(
     )
 
 
-def _validation_product(
+def _common(**kwargs: Any) -> dict[str, Any]:
+    return {
+        **kwargs,
+        "authority": ValidationAuthority.CORROBORATION_ONLY,
+    }
+
+
+def _product(
     *,
     source: str,
     source_product_id: str,
     station_code: str,
-    climate_day: date | None,
-    reported_max_f: int | None,
-    max_observed_at: datetime | None,
     issued_at: datetime,
     mercury_received_at: datetime,
     source_record_id: str,
     source_payload_sha256: str,
-    lifecycle: ValidationLifecycle,
-    authority: ValidationAuthority,
     parser_version: str,
-    corrected: bool,
     revision_of: str | None,
+    authority: ValidationAuthority,
+    climate_day: date | None,
+    reported_max_f: int | None,
+    max_observed_at: datetime | None,
+    lifecycle: ValidationLifecycle,
+    corrected: bool,
     fail_closed_reason: str | None,
     metadata: Mapping[str, Any],
 ) -> ValidationProduct:
     validation_id = _stable_id(
-        "validation-product",
-        source,
-        source_product_id,
-        station_code,
+        "validation-product", source, source_product_id, station_code,
         climate_day.isoformat() if climate_day else "",
         str(reported_max_f) if reported_max_f is not None else "",
-        source_record_id,
-        source_payload_sha256,
-        lifecycle.value,
-        parser_version,
-        VALIDATION_MODEL_VERSION,
+        source_record_id, source_payload_sha256, lifecycle.value,
+        parser_version, VALIDATION_MODEL_VERSION,
     )
     return ValidationProduct(
         validation_id=validation_id,
@@ -558,11 +521,9 @@ def _infer_dsm_date(*, day: int, month: int, issued_at: datetime, timezone_name:
         try:
             candidates.append(date(year, month, day))
         except ValueError:
-            continue
+            pass
     if not candidates:
         raise ValueError("invalid DSM date")
-    # Product dates should be near issuance. The nearest valid date handles
-    # Dec/Jan year rollover without inventing a year from the DD/MM token alone.
     return min(candidates, key=lambda candidate: (abs((candidate - issue_day).days), candidate > issue_day))
 
 
@@ -571,7 +532,7 @@ def _signed_int(token: str) -> int:
     if text.startswith("M"):
         text = "-" + text[1:]
     value = int(text)
-    if value < -150 or value > 150:
+    if not -150 <= value <= 150:
         raise ValueError("temperature outside supported Fahrenheit range")
     return value
 
@@ -590,22 +551,21 @@ def _source_key(value: str) -> str:
 
 
 def _stable_id(*parts: str) -> str:
-    raw = "|".join(parts).encode("utf-8")
-    return f"h4:{sha256(raw).hexdigest()}"
+    return f"h4:{sha256('|'.join(parts).encode('utf-8')).hexdigest()}"
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    return value.isoformat() if value else None
 
 
 def _required_dt(value: Any) -> datetime:
-    parsed = _dt(value)
-    if parsed is None:
+    result = _optional_dt(value)
+    if result is None:
         raise ValueError("datetime is required")
-    return parsed
+    return result
 
 
-def _dt(value: Any) -> datetime | None:
+def _optional_dt(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
