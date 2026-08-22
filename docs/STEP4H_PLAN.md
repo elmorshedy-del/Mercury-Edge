@@ -1,12 +1,14 @@
 # Step 4H plan — DSM / CLI / settlement auditor
 
-Status: **LOCKED BEFORE IMPLEMENTATION**
+Status: **4H-A PASS on GitHub Actions run 449 (201 Python tests + Node + Docker + Postgres). Next: 4H-B immutable validation/settlement journal.**
 
 Branch: `paper-rigour-v2`
 
 PR: #5
 
 Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
+
+Dedicated H-A evidence: `docs/STEP4H_A_VERIFICATION.md`.
 
 ## Why 4H is next
 
@@ -16,147 +18,160 @@ Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
 
 Reviewed `docs/hard-edge-latency-engineering-review-2026-08-21.md` from `main` before starting 4H.
 
-Decision: **do not preempt the canonical Step 4 sequence with latency optimization.** The review's hot-window polling, lower paper process-delay experiments, direct in-memory handoff and fast-path suggestions are performance work. They can wait until the canonical evidence/settlement/replay path is complete and benchmarked. Speed must not be optimized ahead of correctness or causal replay.
+Decision: **do not preempt the canonical Step 4 sequence with latency optimization.** Hot-window AWC polling, lower paper process-delay experiments, direct in-memory handoff, sub-second fast-path benchmarking and Release Explorer work are performance/replay tasks. They wait until the canonical evidence/settlement/replay path is complete enough to measure them without weakening auditability.
 
-One point from the review *does* affect 4H design immediately: settlement-source authority must remain explicit. Kalshi daily-temperature contracts transitioned settlement authority to The Weather Company for contracts from 2026-08-14 onward. NWS DSM/CLI can therefore be valuable validation/corroboration but must not automatically be labelled the authoritative Kalshi settlement source for those events. 4H will model source authority separately from product lifecycle.
-
-This is consistent with current Kalshi market pages, which state the Aug-14 transition to The Weather Company, and with NWS documentation that CLI products are preliminary and issued at least twice daily.
+One correctness point from the review is incorporated now: settlement-source authority must remain explicit. NWS DSM/CLI are validation/corroboration and must not automatically be labelled the authoritative Kalshi settlement source for an event whose captured rules identify another source, including The Weather Company.
 
 ## Core invariant
 
 Validation products and settlement truth are **post-trade audit inputs**. They cannot create an ordinary intraday benchmark hard-state transition.
 
-The 4H path is:
-
 ```text
 exact raw validation/settlement payload
   -> immutable raw_source_journal
   -> source-specific lifecycle parser
-  -> canonical validation product / SettlementTruth
+  -> canonical ValidationProduct / SettlementTruth
   -> append-only validation/settlement journal
   -> compare against hard-state transitions, eliminations and paper orders
-  -> immutable audit findings / critical invariant failures
+  -> immutable audit result
 ```
 
 No DSM/CLI parser may feed `hard_state_accumulator` as benchmark evidence.
 
-## Source/lifecycle distinctions that must remain separate
+## Source/lifecycle distinctions
 
 ### NWS DSM
 
-Official ASOS documentation describes the completed Daily Summary Message as covering 00:00-23:59 LST for the previous day and normally transmitting early the following day. Mercury may use a completed DSM as **validation-only** evidence when the target climate date is explicit and the product form is unambiguous.
-
-Any partial/intermediate DSM form, ambiguous target date or ambiguous maximum/time association fails closed for completed-day validation.
+A completed Daily Summary Message is validation-only and can describe the previous completed 00:00-23:59 LST climate day. A partial/intermediate DSM remains preliminary. Ambiguous target date, maximum, or maximum-time association fails closed.
 
 ### NWS CLI
 
-NWS directives say CLI is issued at least twice daily:
+CLI lifecycle is explicit:
 
-- early local time to capture the **previous completed LST day**;
-- late afternoon/early evening to capture the **current incomplete day**;
-- optional extra issuances may occur.
+- `CURRENT_DAY_PRELIMINARY`
+- `COMPLETED_DAY_PRELIMINARY`
+- `AMBIGUOUS` / `REJECTED`
 
-Therefore CLI lifecycle is explicit:
+A completed-day CLI remains preliminary NWS climate data in Mercury. It is not silently promoted to final contract truth.
 
-- `CURRENT_DAY_PRELIMINARY` — current day is still open;
-- `COMPLETED_DAY_PRELIMINARY` — target LST day has ended and the CLI refers to that completed day;
-- `AMBIGUOUS` — target day cannot be resolved safely.
+### Contract settlement authority
 
-Even a completed-day CLI remains preliminary NWS climate data; it is not silently promoted to final certified climate truth.
+Authoritative settlement is a separate source class. `SettlementTruth` is contract-authoritative only when its source is compatible with the exact captured event rule snapshot or when it represents the exchange's own resolved result with provenance.
 
-### Kalshi / contract settlement authority
+---
 
-Authoritative contract settlement is a separate source class. For modern daily-temperature contracts the exact event rule snapshot/settlement source controls which external source is authoritative. The auditor must not assume that NWS CLI/DSM equals contract settlement merely because values usually agree.
+# 4H-A — Pure lifecycle normalization — PASS
 
-`SettlementTruth` is only authoritative for a contract/event when its source is compatible with the exact captured rule snapshot for that event/date, or when it represents the exchange's own resolved result/value with provenance.
+Implemented:
 
-## 4H-A — Pure lifecycle normalization
+- `paper_collector/settlement_validation.py`
+- `paper_collector/test_settlement_validation.py`
+- CI/Docker inclusion
+- `docs/STEP4H_A_VERIFICATION.md`
 
-Implement a source-neutral validation module before collector wiring.
+Canonical objects:
 
-Required concepts:
+- `ValidationLifecycle`
+- `ValidationAuthority`
+- `ValidationProduct`
+- `AuthoritativeSettlement`
 
-- `ValidationLifecycle`: current-day preliminary, completed-day preliminary, final/authoritative settlement, ambiguous/rejected.
-- `ValidationAuthority`: corroboration-only, contract-authoritative, exchange-result.
-- `ValidationProduct`: source, source product id, station, climate date, reported max, issued/observed clocks, raw source id/hash, lifecycle, authority, parser/model/calendar versions and fail-closed reason.
-- deterministic IDs/hashes from exact source identity + parser/model versions.
+Source adapters:
 
-Required source adapters:
+- `parse_nws_dsm(...)`
+- `parse_nws_cli(...)`
+- `build_authoritative_settlement(...)`
 
-- NWS DSM parser with explicit target `DD/MM`, max and max-time parsing; completed-day status only when the issuance/target date relationship is mechanically valid under the station's LST calendar;
-- NWS CLI parser extracting an explicit report date and `MAXIMUM`; lifecycle determined from target climate date versus issuance time, never from `MAXIMUM` alone;
-- authoritative settlement adapter that requires explicit event/date/station/source/rules provenance.
+Key rules proven by tests:
 
-4H-A must not do network I/O or DB writes.
+- current-day CLI is preliminary;
+- next-day CLI can be completed-day preliminary but is not final;
+- missing/ambiguous CLI report date fails closed;
+- completed DSM maps to exact prior LST climate date and maximum time;
+- partial/ambiguous DSM cannot become completed-day truth;
+- NWS products remain `CORROBORATION_ONLY` / `VALIDATION_ONLY`;
+- validation evidence cannot raise `HardClimateState`;
+- authoritative settlement requires exact event-date and rule-source provenance;
+- rule-source mismatch fails closed;
+- objects are deterministic/versioned and round-trip.
 
-### 4H-A acceptance tests
+Verification: GitHub Actions run **449** (`32543567380`) on code-complete commit `de9e973ae110bf99c2a2b16ddc4a75abf04f3c7a` — **201 Python tests passed**, Python compile PASS, Docker PASS, Node PASS, full Postgres migrations PASS, SQL013/016/017/018 immutable regressions PASS.
 
-- current-day CLI is preliminary and cannot become final truth;
-- next-day CLI for the previous completed LST day is completed-day preliminary only;
-- ambiguous/missing CLI report date fails closed;
-- completed DSM maps to the exact prior LST climate date and preserves max time;
-- partial/ambiguous DSM cannot be labelled completed-day validation;
-- every NWS product remains validation/corroboration authority only;
-- authoritative settlement construction fails closed without matching event/date/station/rule-source provenance;
-- validation objects are deterministic/versioned and round-trip.
+No merge or deployment occurred.
 
-Full CI must pass before 4H-A is marked complete.
+---
 
-## 4H-B — Immutable validation/settlement journal
+# 4H-B — Immutable validation/settlement journal — NEXT
 
-Create append-only DB tables for:
+Create append-only database/persistence for:
 
-- normalized validation products;
-- authoritative settlement truths;
-- settlement audit comparisons/findings.
+1. normalized validation products;
+2. authoritative settlement truths;
+3. settlement audit results/findings.
 
-All rows must retain raw source links and parser/model/rules/calendar versions. UPDATE/DELETE must be rejected by DB triggers. Revised/corrected products create new rows and may reference the prior version; no old product is overwritten.
+Requirements:
 
-## 4H-C — Raw-first collectors/adapters
+- exact raw-source links are mandatory for persisted source products/truth;
+- parser/model/rules/calendar versions are preserved;
+- deterministic canonical payload hash on every row;
+- same stable identity + same bytes is idempotent;
+- same stable identity + different bytes fails closed;
+- revised/corrected products create new rows and may reference a previous version;
+- no historical product/truth/audit row is overwritten;
+- database triggers reject UPDATE/DELETE;
+- a real Postgres regression proves immutability and revision coexistence.
+
+4H-B must pass full CI before 4H-C begins.
+
+---
+
+# 4H-C — Raw-first collectors/adapters
 
 Wire collection without weakening raw-first discipline:
 
-- exact api.weather.gov DSM/CLI HTTP entity bytes are stored before parsing;
+- exact `api.weather.gov` DSM/CLI HTTP entity bytes are stored before parsing;
 - source product id/issuance time and Mercury receipt are separate clocks;
-- repeated/corrected product issuances remain separately inspectable;
-- contract settlement/raw exchange result is captured separately from NWS validation products;
-- existing legacy `product_releases` can be read for research/backfill but must not be relabelled as immutable raw-first truth unless an exact raw record exists.
+- repeated/corrected issuances remain separately inspectable;
+- contract settlement/exchange result is captured separately from NWS validation products;
+- existing legacy `product_releases` may support research/backfill but cannot be relabelled immutable raw-first truth unless exact raw provenance exists.
 
-No Railway deploy is required or allowed merely to finish implementation/tests.
+No Railway deployment is required merely to complete H-C implementation/tests.
 
-## 4H-D — Transition/trade settlement audit
+---
+
+# 4H-D — Transition/trade settlement audit
 
 For authoritative completed settlement truth:
 
-- compare final max against every canonical hard-state transition used for benchmark trading;
-- if `final_max_f < proven_daily_high_min_f`, emit a **critical invariant failure**;
-- compare each exact `BucketElimination`/paper order to the settled market result;
-- if a bucket marked mathematically impossible settles YES, emit a **critical invariant failure** with state/elimination/order/raw provenance;
-- NWS-only disagreement is a validation discrepancy and must not be mislabeled as an exchange settlement failure when NWS is not the event's authoritative source;
-- corrections/revisions append new audit results; they do not rewrite what Mercury knew or previously audited.
+- compare final max against canonical hard-state transitions used for benchmark trading;
+- `final_max_f < proven_daily_high_min_f` => **critical invariant failure**;
+- compare exact elimination/order provenance against settled market result;
+- an outcome Mercury proved impossible settling YES => **critical invariant failure**;
+- NWS-only disagreement is a validation discrepancy, not an authoritative exchange failure when NWS is not the captured contract source;
+- corrections/revisions append new audit results and never rewrite historical knowledge or prior audits.
 
-### 4H-D acceptance tests
+Acceptance:
 
-- DSM/CLI cannot enter the benchmark hard-state accumulator;
-- same-day preliminary CLI is never final;
-- final settlement can trace to the exact hard-state transition and raw evidence chain;
-- impossible-bucket YES settlement produces a critical failure;
-- final max below a traded hard lower bound produces a critical failure;
-- non-authoritative NWS disagreement is classified separately from authoritative settlement failure;
-- correction/revision history is preserved.
+- DSM/CLI cannot trigger benchmark hard state;
+- preliminary CLI is never final;
+- authoritative truth traces to exact transition/raw evidence chain;
+- impossible-bucket YES settlement is critical;
+- final max below traded hard bound is critical;
+- non-authoritative NWS disagreement is classified separately;
+- correction/revision history survives intact.
 
-## 4H completion gate
+---
 
-4H is complete only when A-D, full CI and immutable DB regressions pass. Then update the canonical TODO and refactor log with exact commit/run/test counts.
+# 4H completion gate
 
-## Explicitly deferred performance work from the latency review
+4H is complete only when A-D, full CI and immutable DB regressions pass. Then the canonical TODO and refactor documentation are advanced to 4I.
 
-The following remain valuable but are **not prerequisites for 4H**:
+## Explicitly deferred performance work
+
+The latency review remains preserved, but these are **not prerequisites for 4H**:
 
 - station-specific AWC hot-poll windows;
 - reducing/calibrating the 6-second paper processing delay;
 - direct in-memory/event-queue handoff instead of DB polling;
-- sub-second internal latency target benchmarking;
-- release-explorer UI and market-reaction visualization.
-
-These belong after correctness/replay instrumentation can measure them without compromising auditability.
+- sub-second internal latency benchmarking;
+- Release Explorer / market-reaction visualization.
