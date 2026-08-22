@@ -34,6 +34,30 @@ STATIONS: dict[str, dict[str, str]] = {
     "KSAT": {"city": "San Antonio", "series": "KXHIGHTSATX", "network": "TX_ASOS", "tier": "broad", "region": "texas", "timezone": "America/Chicago"},
 }
 
+# api.weather.gov climate-product location identifiers. Kept explicit rather
+# than inferred from the ICAO station because the product API keys on NWS
+# product locations, not on Mercury's own station naming convention.
+NWS_VALIDATION_LOCATIONS: dict[str, str] = {
+    "KNYC": "NYC",
+    "KPHL": "PHL",
+    "KLAX": "LAX",
+    "KPHX": "PHX",
+    "KMDW": "MDW",
+    "KMSP": "MSP",
+    "KDCA": "DCA",
+    "KATL": "ATL",
+    "KMSY": "MSY",
+    "KBOS": "BOS",
+    "KMIA": "MIA",
+    "KOKC": "OKC",
+    "KDFW": "DFW",
+    "KDEN": "DEN",
+    "KAUS": "AUS",
+    "KHOU": "HOU",
+    "KLAS": "LAS",
+    "KSAT": "SAT",
+}
+
 # All 18 stations had historical market/weather coverage in the latest stored run.
 WEATHER_STATIONS: tuple[str, ...] = tuple(STATIONS)
 MARKET_SERIES: tuple[str, ...] = tuple(dict.fromkeys(v["series"] for v in STATIONS.values()))
