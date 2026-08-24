@@ -8,13 +8,12 @@ the current dead-NO execution math, and evolves a private replay portfolio.
 There is no candle/midpoint/proxy fallback.
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
-from typing import Any, Iterable, Mapping, Sequence
-from zoneinfo import ZoneInfo
+from typing import Any, Mapping, Sequence
 
 import psycopg
 
@@ -267,13 +266,7 @@ def audit_chain_hash(prev: str | None, connection_id: str, received_epoch_ns: in
     return sha256(material).hexdigest()
 
 
-def reconstruct_book(
-    rows: Sequence[ReplayMarketRow],
-    *,
-    market_ticker: str,
-    arrival_ms: int,
-) -> tuple[ReplayBook | None, str | None]:
-    """Rebuild exact L2 no later than arrival and fail closed on integrity errors."""
+def reconstruct_book(rows: Sequence[ReplayMarketRow], *, market_ticker: str, arrival_ms: int) -> tuple[ReplayBook | None, str | None]:
     causal = sorted(
         (row for row in rows if row.received_epoch_ms <= arrival_ms),
         key=lambda row: (row.row_id, row.received_epoch_ns),
@@ -282,6 +275,7 @@ def reconstruct_book(
         return None, "NO_VALID_L2_AT_SIMULATED_ARRIVAL"
 
     invalid_connections: set[str] = set()
+    target_connections: set[str] = set()
     last_chain: dict[str, str] = {}
     last_seq: dict[tuple[str, int], int] = {}
     snapshot_seen: set[tuple[str, str]] = set()
@@ -289,8 +283,11 @@ def reconstruct_book(
     snapshot_candidates: list[tuple[int, int, str]] = []
 
     for row in causal:
-        actual_sha = sha256(row.raw_text.encode()).hexdigest()
         conn_key = row.connection_id or "legacy"
+        if row.channel in ("orderbook_snapshot", "orderbook_delta") and row.market_ticker == market_ticker:
+            target_connections.add(conn_key)
+
+        actual_sha = sha256(row.raw_text.encode()).hexdigest()
         if actual_sha != row.payload_sha256:
             invalid_connections.add(conn_key)
             continue
@@ -298,9 +295,7 @@ def reconstruct_book(
             expected_prev = last_chain.get(row.connection_id)
             if (row.prev_chain_hash or None) != (expected_prev or None):
                 invalid_connections.add(conn_key)
-            expected_chain = audit_chain_hash(
-                row.prev_chain_hash, row.connection_id, row.received_epoch_ns, row.payload_sha256
-            )
+            expected_chain = audit_chain_hash(row.prev_chain_hash, row.connection_id, row.received_epoch_ns, row.payload_sha256)
             if row.chain_hash != expected_chain:
                 invalid_connections.add(conn_key)
             if row.chain_hash:
@@ -327,6 +322,8 @@ def reconstruct_book(
 
         msg = data.get("msg") if isinstance(data.get("msg"), dict) else {}
         ticker = str(msg.get("market_ticker") or row.market_ticker or "")
+        if ticker == market_ticker:
+            target_connections.add(conn_key)
         if not ticker:
             invalid_connections.add(conn_key)
             continue
@@ -338,9 +335,7 @@ def reconstruct_book(
                 no = _snapshot_side(msg.get("no_dollars_fp") or [], "no", row.price_mode)
                 _validate_binary_book(yes, no)
                 books[book_key] = {
-                    "yes": yes,
-                    "no": no,
-                    "snapshot_id": row.row_id,
+                    "yes": yes, "no": no, "snapshot_id": row.row_id,
                     "snapshot_received_ms": row.received_epoch_ms,
                     "last_seq": int(row.seq) if row.seq is not None else None,
                 }
@@ -373,8 +368,9 @@ def reconstruct_book(
 
     usable = [item for item in snapshot_candidates if item[2] not in invalid_connections]
     if not usable:
-        reason = "L2_CONNECTION_INTEGRITY_FAILURE" if snapshot_candidates else "NO_VALID_L2_AT_SIMULATED_ARRIVAL"
-        return None, reason
+        if target_connections & invalid_connections:
+            return None, "L2_CONNECTION_INTEGRITY_FAILURE"
+        return None, "NO_VALID_L2_AT_SIMULATED_ARRIVAL"
     _, _, conn_key = max(usable)
     state = books.get((conn_key, market_ticker))
     if not state:
@@ -390,13 +386,7 @@ def reconstruct_book(
     ), None
 
 
-def execute_replay(
-    *,
-    manifest: ReplayManifest,
-    hard_state: ReplayHardStateResult,
-    market_rows: Sequence[ReplayMarketRow],
-    config: ReplayExecutionConfig,
-) -> ReplayExecutionResult:
+def execute_replay(*, manifest: ReplayManifest, hard_state: ReplayHardStateResult, market_rows: Sequence[ReplayMarketRow], config: ReplayExecutionConfig) -> ReplayExecutionResult:
     assert_supported_execution(manifest)
     portfolio = _Portfolio(
         start=config.starting_bankroll,
@@ -413,7 +403,7 @@ def execute_replay(
         payload = elimination.elimination_payload
         event_ticker = str(payload.get("event_ticker") or "")
         eliminated = [item for item in payload.get("eliminations", []) if isinstance(item, Mapping) and item.get("eliminated") is True]
-        evaluated: list[tuple[Mapping[str, Any], ReplayBook, tuple[tuple[Decimal, Decimal], ...], dne.DeadNoPlan, Decimal]] = []
+        evaluated = []
 
         for item in eliminated:
             market = str(item.get("market_ticker") or "")
@@ -421,87 +411,53 @@ def execute_replay(
             arrival_at = datetime.fromtimestamp(arrival_ms / 1000, tz=timezone.utc)
             budget = _mode_budget(portfolio, config)
             if budget <= 0:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "skip", "PORTFOLIO_CAP_REACHED", Decimal(0), config,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "skip", "PORTFOLIO_CAP_REACHED", Decimal(0), config))
                 continue
-            book, book_reason = reconstruct_book(market_rows, market_ticker=market, arrival_ms=arrival_ms)
+            book, reason = reconstruct_book(market_rows, market_ticker=market, arrival_ms=arrival_ms)
             if book is None:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "blocked", book_reason or "NO_VALID_L2_AT_SIMULATED_ARRIVAL", budget, config,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "blocked", reason or "NO_VALID_L2_AT_SIMULATED_ARRIVAL", budget, config))
                 continue
-            asks = tuple((price, qty) for price, qty in book.no_asks if price <= config.max_no_price and qty > 0)
+            asks = tuple((p, q) for p, q in book.no_asks if p <= config.max_no_price and q > 0)
             if not asks:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "skip", "NO_EXECUTABLE_NO_ASK_WITHIN_GUARD", budget, config, book=book,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "skip", "NO_EXECUTABLE_NO_ASK_WITHIN_GUARD", budget, config, book=book))
                 continue
-            plan = dne.plan_dead_no(
-                asks,
-                budget=budget,
-                fee_multiplier=config.fee_multiplier,
-                max_price=config.max_no_price,
-            )
+            plan = dne.plan_dead_no(asks, budget=budget, fee_multiplier=config.fee_multiplier, max_price=config.max_no_price)
             if plan is None:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "skip", "NO_POSITIVE_GUARANTEED_RETURN_AFTER_FEES", budget, config, book=book,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "skip", "NO_POSITIVE_GUARANTEED_RETURN_AFTER_FEES", budget, config, book=book))
                 continue
-            depth = sum((price * qty for price, qty in asks), Decimal(0))
+            depth = sum((p * q for p, q in asks), Decimal(0))
             evaluated.append((item, book, asks, plan, depth))
 
         if not evaluated:
             continue
         evaluated = _rank(evaluated, config.allocation)
-        allocations = _allocations(evaluated, portfolio, config)
-        for evaluated_item, allowed in zip(evaluated, allocations):
-            item, book, asks, _, _ = evaluated_item
+        targets = _allocation_targets(evaluated, portfolio, config)
+        for index, (item, book, asks, _evaluation_plan, _depth) in enumerate(evaluated):
             market = str(item.get("market_ticker") or "")
             arrival_ms = int(elimination.known_at.timestamp() * 1000) + config.execution_latency_ms
             arrival_at = datetime.fromtimestamp(arrival_ms / 1000, tz=timezone.utc)
+            current_budget = _mode_budget(portfolio, config)
+            target = targets[index]
+            allowed = current_budget if target is None else min(target, current_budget)
             if allowed <= 0:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "skip", "PORTFOLIO_CAP_REACHED", Decimal(0), config, book=book,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "skip", "PORTFOLIO_CAP_REACHED", Decimal(0), config, book=book))
                 continue
-            plan = dne.plan_dead_no(
-                asks,
-                budget=allowed,
-                fee_multiplier=config.fee_multiplier,
-                max_price=config.max_no_price,
-            )
+            plan = dne.plan_dead_no(asks, budget=allowed, fee_multiplier=config.fee_multiplier, max_price=config.max_no_price)
             if plan is None:
-                decisions.append(_decision(
-                    elimination, item, event_ticker, market, arrival_at,
-                    "skip", "NO_POSITIVE_GUARANTEED_RETURN_AFTER_FEES", allowed, config, book=book,
-                ))
+                decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "skip", "NO_POSITIVE_GUARANTEED_RETURN_AFTER_FEES", allowed, config, book=book))
                 continue
-            decision = _decision(
-                elimination, item, event_ticker, market, arrival_at,
-                "trade", "EXECUTABLE_DEAD_NO_GUARANTEED", allowed, config,
-                book=book, plan=plan,
-            )
-            decisions.append(decision)
+            decisions.append(_decision(elimination, item, event_ticker, market, arrival_at, "trade", "EXECUTABLE_DEAD_NO_GUARANTEED", allowed, config, book=book, plan=plan))
             portfolio.cash -= plan.total_cost
             portfolio.event_used += plan.total_cost
             portfolio.region_used += plan.total_cost
             portfolio.day_used += plan.total_cost
+            if portfolio.cash < 0:
+                raise RuntimeError("replay portfolio overspend invariant violated")
             prior = portfolio.positions.get(market)
             if prior is None:
                 portfolio.positions[market] = ReplayPosition(market, plan.filled_qty, plan.gross_cost, plan.fee)
             else:
-                portfolio.positions[market] = ReplayPosition(
-                    market,
-                    prior.qty + plan.filled_qty,
-                    prior.gross_cost + plan.gross_cost,
-                    prior.fees + plan.fee,
-                )
+                portfolio.positions[market] = ReplayPosition(market, prior.qty + plan.filled_qty, prior.gross_cost + plan.gross_cost, prior.fees + plan.fee)
 
     return ReplayExecutionResult(
         manifest_id=manifest.manifest_id,
@@ -540,26 +496,22 @@ def load_market_rows(conn: psycopg.Connection[Any], *, session_id: str) -> tuple
     ) for row in rows)
 
 
-def _rank(items: list[tuple[Mapping[str, Any], ReplayBook, tuple[tuple[Decimal, Decimal], ...], dne.DeadNoPlan, Decimal]], allocation: str):
+def _rank(items, allocation: str):
     if allocation == "depth_first":
-        return sorted(items, key=lambda item: (item[3].total_cost, item[3].guaranteed_roi, item[3].guaranteed_profit, str(item[0].get("market_ticker"))), reverse=True)
-    return sorted(items, key=lambda item: (item[3].guaranteed_roi, item[3].guaranteed_profit, item[3].total_cost, str(item[0].get("market_ticker"))), reverse=True)
+        return sorted(items, key=lambda x: (x[3].total_cost, x[3].guaranteed_roi, x[3].guaranteed_profit, str(x[0].get("market_ticker"))), reverse=True)
+    return sorted(items, key=lambda x: (x[3].guaranteed_roi, x[3].guaranteed_profit, x[3].total_cost, str(x[0].get("market_ticker"))), reverse=True)
 
 
-def _allocations(items, portfolio: _Portfolio, config: ReplayExecutionConfig) -> list[Decimal]:
+def _allocation_targets(items, portfolio: _Portfolio, config: ReplayExecutionConfig) -> list[Decimal | None]:
     if config.allocation == "equal_risk":
-        available = min((_mode_budget(portfolio, config) for _ in items), default=Decimal(0))
+        available = _mode_budget(portfolio, config)
         each = available / Decimal(len(items)) if items else Decimal(0)
-        return [min(each, _mode_budget(portfolio, config)) for _ in items]
+        return [each for _ in items]
     if config.allocation == "edge_weighted":
         available = _mode_budget(portfolio, config)
         total = sum((item[3].guaranteed_roi for item in items), Decimal(0))
-        return [
-            min(available * (item[3].guaranteed_roi / total if total > 0 else Decimal(1) / Decimal(len(items))), _mode_budget(portfolio, config))
-            for item in items
-        ]
-    # Sequential modes recalculate budget after every fill in execute_replay.
-    return [_mode_budget(portfolio, config) for _ in items]
+        return [available * (item[3].guaranteed_roi / total if total > 0 else Decimal(1) / Decimal(len(items))) for item in items]
+    return [None for _ in items]
 
 
 def _mode_budget(portfolio: _Portfolio, config: ReplayExecutionConfig) -> Decimal:
@@ -578,38 +530,22 @@ def _mode_budget(portfolio: _Portfolio, config: ReplayExecutionConfig) -> Decima
 def _decision(elimination: ReplayTransitionElimination, item: Mapping[str, Any], event_ticker: str, market: str, arrival_at: datetime, decision: str, reason: str, budget: Decimal, config: ReplayExecutionConfig, *, book: ReplayBook | None = None, plan: dne.DeadNoPlan | None = None) -> ReplayDecision:
     elimination_id = str(item.get("elimination_id") or "") or None
     identity = {
-        "manifest_state": elimination.state_id,
-        "elimination_id": elimination_id,
-        "event": event_ticker,
-        "market": market,
-        "arrival": arrival_at.isoformat(),
-        "decision": decision,
-        "reason": reason,
-        "budget": str(budget),
+        "manifest_state": elimination.state_id, "elimination_id": elimination_id,
+        "event": event_ticker, "market": market, "arrival": arrival_at.isoformat(),
+        "decision": decision, "reason": reason, "budget": str(budget),
         "config": config.config_sha256,
         "fills": [[str(p), str(q)] for p, q in (plan.fills if plan else ())],
     }
     decision_id = "replay-decision:" + sha256(canonical_json_bytes(identity)).hexdigest()[:24]
     return ReplayDecision(
-        decision_id=decision_id,
-        state_id=elimination.state_id,
-        elimination_id=elimination_id,
-        event_ticker=event_ticker,
-        market_ticker=market,
-        decision_at=elimination.known_at,
-        simulated_arrival_at=arrival_at,
-        decision=decision,
-        reason=reason,
-        requested_budget=budget,
-        filled_qty=plan.filled_qty if plan else Decimal(0),
-        gross_cost=plan.gross_cost if plan else Decimal(0),
-        fee=plan.fee if plan else Decimal(0),
-        total_cost=plan.total_cost if plan else Decimal(0),
+        decision_id=decision_id, state_id=elimination.state_id, elimination_id=elimination_id,
+        event_ticker=event_ticker, market_ticker=market, decision_at=elimination.known_at,
+        simulated_arrival_at=arrival_at, decision=decision, reason=reason, requested_budget=budget,
+        filled_qty=plan.filled_qty if plan else Decimal(0), gross_cost=plan.gross_cost if plan else Decimal(0),
+        fee=plan.fee if plan else Decimal(0), total_cost=plan.total_cost if plan else Decimal(0),
         guaranteed_profit=plan.guaranteed_profit if plan else Decimal(0),
-        guaranteed_roi=plan.guaranteed_roi if plan else Decimal(0),
-        fills=plan.fills if plan else (),
-        connection_id=book.connection_id if book else None,
-        snapshot_id=book.snapshot_id if book else None,
+        guaranteed_roi=plan.guaranteed_roi if plan else Decimal(0), fills=plan.fills if plan else (),
+        connection_id=book.connection_id if book else None, snapshot_id=book.snapshot_id if book else None,
         book_seq=book.last_seq if book else None,
     )
 
