@@ -24,8 +24,6 @@ jobs:
 
   collector-checks:
     runs-on: ubuntu-latest
-    outputs:
-      python_test_count: ${{ steps.unit-tests.outputs.count }}
     defaults:
       run:
         working-directory: paper_collector
@@ -38,13 +36,7 @@ jobs:
           cache-dependency-path: paper_collector/requirements.txt
       - run: pip install -r requirements.txt
       - run: python -m py_compile collector.py weather_collector.py omo_collector.py rule_collector.py validation_collector.py diagnostic_sweep.py paper_engine.py paper_engine_hardened.py strategy_engines.py strategy_runtime.py strategy_runtime_hardened.py unified_engine.py status_reporter.py audit_replay.py audit_daemon.py runner.py stations.py asos_evidence.py market_calendar.py hard_state_proof.py hard_information_domain.py hard_state_accumulator.py hard_state_journal.py bucket_elimination.py dead_no_execution.py dead_no_executor.py madis_omo.py madis_temperature_mapping.py madis_validation.py madis_transport.py settlement_validation.py settlement_audit_domain.py settlement_journal.py settlement_auditor.py information_visibility.py explainability.py failure_events.py failure_event_sweeper.py replay_domain.py replay_hard_state.py replay_execution.py replay_settlement.py raw_journal.py test_strategy_engines.py test_asos_evidence.py test_market_calendar.py test_hard_state_proof.py test_hard_state_integration.py test_hard_information_domain.py test_hard_state_accumulator.py test_hard_state_accumulator_integration.py test_bucket_elimination.py test_dead_no_execution.py test_dead_no_executor.py test_madis_omo.py test_madis_temperature_mapping.py test_madis_validation.py test_madis_transport.py test_settlement_validation.py test_settlement_journal.py test_exchange_settlement_journal.py test_settlement_auditor.py test_validation_collector.py test_information_visibility.py test_explainability.py test_failure_events.py test_failure_event_sweeper.py test_replay_domain.py test_replay_hard_state.py test_replay_execution.py test_replay_execution_portfolio.py test_replay_settlement.py test_replay_e2e_postgres.py test_explainability_postgres.py test_raw_journal.py test_weather_collector_capture.py test_evidence_versioning.py test_live_asos_channels.py
-      - id: unit-tests
-        run: |
-          set -o pipefail
-          python -m unittest -v test_strategy_engines.py test_asos_evidence.py test_market_calendar.py test_hard_state_proof.py test_hard_state_integration.py test_hard_information_domain.py test_hard_state_accumulator.py test_hard_state_accumulator_integration.py test_bucket_elimination.py test_dead_no_execution.py test_dead_no_executor.py test_madis_omo.py test_madis_temperature_mapping.py test_madis_validation.py test_madis_transport.py test_settlement_validation.py test_settlement_journal.py test_exchange_settlement_journal.py test_settlement_auditor.py test_validation_collector.py test_information_visibility.py test_explainability.py test_failure_events.py test_failure_event_sweeper.py test_replay_domain.py test_replay_hard_state.py test_replay_execution.py test_replay_execution_portfolio.py test_replay_settlement.py test_raw_journal.py test_weather_collector_capture.py test_evidence_versioning.py test_live_asos_channels.py 2>&1 | tee /tmp/mercury-unit-tests.log
-          count="$(sed -n 's/^Ran \([0-9][0-9]*\) tests.*/\1/p' /tmp/mercury-unit-tests.log | tail -1)"
-          test -n "$count"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - run: python -m unittest -v test_strategy_engines.py test_asos_evidence.py test_market_calendar.py test_hard_state_proof.py test_hard_state_integration.py test_hard_information_domain.py test_hard_state_accumulator.py test_hard_state_accumulator_integration.py test_bucket_elimination.py test_dead_no_execution.py test_dead_no_executor.py test_madis_omo.py test_madis_temperature_mapping.py test_madis_validation.py test_madis_transport.py test_settlement_validation.py test_settlement_journal.py test_exchange_settlement_journal.py test_settlement_auditor.py test_validation_collector.py test_information_visibility.py test_explainability.py test_failure_events.py test_failure_event_sweeper.py test_replay_domain.py test_replay_hard_state.py test_replay_execution.py test_replay_execution_portfolio.py test_replay_settlement.py test_raw_journal.py test_weather_collector_capture.py test_evidence_versioning.py test_live_asos_channels.py
       - run: python -c "import websockets, cryptography, psycopg; print(websockets.__version__, cryptography.__version__, psycopg.__version__)"
       - run: docker build -t mercury-paper-collector .
 
@@ -90,53 +82,3 @@ jobs:
       - run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/tests/022_deterministic_replay_results_test.sql
       - run: python paper_collector/test_explainability_postgres.py
       - run: python paper_collector/test_replay_e2e_postgres.py
-
-  verification-proof:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/paper-rigour-v2'
-    needs:
-      - node-checks
-      - collector-checks
-      - migration-checks
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: paper-rigour-v2
-      - name: Record full-gate proof
-        env:
-          TESTED_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_NUMBER: ${{ github.run_number }}
-          PYTHON_TEST_COUNT: ${{ needs.collector-checks.outputs.python_test_count }}
-        run: |
-          set -euo pipefail
-          test -n "$PYTHON_TEST_COUNT"
-          mkdir -p docs
-          cat > docs/CI_PROOF.md <<EOF
-          # Mercury hardening CI proof
-
-          This file is written only after the complete `Paper Trader CI` push gate succeeds.
-          The proof commit itself changes only this file; `tested_sha` is the code/config tree exercised by the gate.
-
-          - tested_sha: `$TESTED_SHA`
-          - workflow_run_id: `$RUN_ID`
-          - workflow_run_number: `$RUN_NUMBER`
-          - python_unit_tests: `$PYTHON_TEST_COUNT` passed
-          - python_compile: PASS
-          - collector_docker_build: PASS
-          - node_typecheck: PASS
-          - fresh_postgres_migrations: PASS
-          - immutable SQL regressions 013/016/017/018/019/020/021/022: PASS
-          - explainability real-Postgres regression: PASS
-          - deterministic replay 4J-D real-Postgres anti-leak regression: PASS
-          EOF
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/CI_PROOF.md
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m "ci: record verified hardening gate"
-          git push origin HEAD:paper-rigour-v2
