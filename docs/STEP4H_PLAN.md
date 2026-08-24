@@ -1,6 +1,6 @@
 # Step 4H plan — DSM / CLI / settlement auditor
 
-Status: **4H-A PASS run 449; 4H-B PASS run 465; 4H-C PASS run 477. Next: 4H-D transition/trade settlement audit.**
+Status: **PASS — 4H-A run 449; 4H-B run 465; 4H-C run 477; 4H-D run 501. Next unblocked canonical step: 4I debugging/explainability.**
 
 Branch: `paper-rigour-v2`
 
@@ -12,16 +12,17 @@ Verification notes:
 - `docs/STEP4H_A_VERIFICATION.md`
 - `docs/STEP4H_B_VERIFICATION.md`
 - `docs/STEP4H_C_VERIFICATION.md`
+- `docs/STEP4H_D_VERIFICATION.md`
 
-## Why 4H is next
+## Dependency note
 
-4G-C3 remains blocked on actual MADIS data/live access and needs completed-day validation/settlement truth. The next unblocked canonical work is 4H.
+4G-C3 remains blocked on actual MADIS data/live access. Step 4H supplies the completed-day validation/settlement layer needed for that future empirical gate, but **does not promote MADIS evidence to benchmark trust**.
 
 ## Latency-engineering review triage
 
 `docs/hard-edge-latency-engineering-review-2026-08-21.md` was reviewed before 4H. No latency optimization preempts the canonical Step 4 sequence. Hot-window polling, lower process-delay experiments, in-memory handoff, sub-second fast-path benchmarking and Release Explorer work remain later performance/replay tasks.
 
-One correctness point is incorporated now: **settlement-source authority is explicit.** NWS DSM/CLI are validation/corroboration and are not automatically contract-authoritative when the captured Kalshi rules identify another settlement source.
+One correctness point from that review is now fully incorporated: **settlement-source authority is explicit.** NWS DSM/CLI are validation/corroboration and are not automatically contract-authoritative when the captured Kalshi rules identify another settlement source.
 
 ## Core invariant
 
@@ -31,9 +32,9 @@ Validation products and settlement truth are post-trade audit inputs. They canno
 exact raw validation/settlement payload
   -> immutable raw_source_journal
   -> source-specific lifecycle parser
-  -> canonical ValidationProduct / SettlementTruth
+  -> canonical ValidationProduct / settlement object
   -> append-only validation/settlement journal
-  -> compare against hard-state transitions, eliminations and paper orders
+  -> compare against hard-state transition + elimination + paper order
   -> immutable audit result
 ```
 
@@ -47,7 +48,7 @@ Key facts:
 - DSM completed/partial/correction lifecycle is explicit and uses the fixed LST climate calendar.
 - CLI requires an explicit report date and remains preliminary NWS validation data.
 - NWS products are `CORROBORATION_ONLY` / `VALIDATION_ONLY` and cannot raise `HardClimateState`.
-- authoritative settlement construction requires exact event-date/rule-source provenance.
+- authoritative numeric settlement construction requires exact event-date/rule-source provenance.
 
 Verification: run **449** (`32543567380`), commit `de9e973ae110bf99c2a2b16ddc4a75abf04f3c7a`, **201 Python tests** + compile/Docker/Node/Postgres PASS.
 
@@ -88,72 +89,66 @@ Facts:
 - unresolved market results fail closed;
 - no unproven conversion from Kalshi `expiration_value` to physical final temperature is made.
 
-The collector/adapters are implemented and testable but are **not runtime-enabled or deployed** during Step 4. Production activation remains a later explicit deployment decision.
+The collector/adapters are implemented and testable but are **not runtime-enabled or deployed** during Step 4.
 
 Verification: run **477** (`32544064514`), commit `f0451537aea502f7feb5a96304d40481fc1dd80c`, **218 Python tests** + compile/Docker/Node/Postgres/SQL019 PASS.
 
 ---
 
-# 4H-D — Transition/trade settlement audit — NEXT
+# 4H-D — Transition/trade settlement audit — PASS
 
-## Inputs
+Implemented:
+- `paper_collector/settlement_audit_domain.py`
+- `paper_collector/settlement_auditor.py`
+- `paper_collector/test_settlement_auditor.py`
+- `paper_collector/test_exchange_settlement_journal.py`
+- `sql/020_exchange_market_settlement.sql`
+- `sql/tests/020_exchange_market_settlement_test.sql`
 
-H-D consumes only canonical/auditable facts:
-
-- authoritative numeric `SettlementTruth` when a final max is actually source-authorized;
-- authoritative exchange market result captured from exact Kalshi bytes;
-- canonical `HardClimateState` transition;
-- canonical `BucketElimination` proof;
-- benchmark paper-order identity/provenance;
-- optional NWS `ValidationProduct` for corroboration/discrepancy only.
-
-## Required invariant checks
+Hard invariants:
 
 1. **Hard-state vs authoritative final max**
-   - if authoritative `final_max_f < proven_daily_high_min_f`: `critical / invariant_failure / HARD_STATE_EXCEEDS_FINAL_MAX`.
+   - authoritative `final_max_f < proven_daily_high_min_f` => `critical / invariant_failure / HARD_STATE_EXCEEDS_FINAL_MAX`.
 
 2. **Eliminated bucket vs exchange settlement**
-   - if an exact market Mercury proved impossible settles `YES`: `critical / invariant_failure / IMPOSSIBLE_BUCKET_SETTLED_YES`.
-   - a NO settlement for an eliminated bucket is a pass/corroboration.
+   - exact market Mercury proved impossible settles `YES` => `critical / invariant_failure / IMPOSSIBLE_BUCKET_SETTLED_YES`.
+   - exact eliminated market settles `NO` => pass.
 
 3. **NWS disagreement when NWS is not contract authority**
-   - classify as validation discrepancy/warning;
-   - never mislabel it as an exchange/contract invariant failure.
+   - classified as validation discrepancy/warning only;
+   - never mislabeled as an exchange/contract invariant failure.
 
 4. **Identity gates**
-   - station, climate date, event and market must agree exactly;
-   - mismatches fail closed and cannot be counted as a valid pass/failure comparison.
+   - session, station, climate date, event, market, hard state, elimination and exact event rules must agree;
+   - mismatch fails closed.
 
 5. **Revision behavior**
-   - newer corrections/final truths generate new deterministic audit rows;
+   - newer corrections/final truths generate new deterministic audit identities;
    - prior audit conclusions remain immutable historical outputs.
 
-## H-D acceptance tests
+6. **No invented numeric settlement semantics**
+   - exchange market results can be authoritative for contract outcomes without Mercury pretending an undocumented API field is the physical final temperature.
 
-- clean hard state <= final max passes;
-- authoritative final max below hard state is critical;
-- eliminated market settling NO passes;
-- eliminated market settling YES is critical;
-- non-eliminated market result cannot produce the impossible-bucket invariant;
-- station/date/event/market mismatch fails closed;
-- non-authoritative NWS disagreement is warning/discrepancy only;
-- audit output carries settlement/state/elimination/order/raw provenance;
-- repeated same inputs are deterministic/idempotent;
-- revised truth creates a distinct audit identity without mutating the prior result.
+Verification: GitHub Actions **run 501 (`32544466584`)** on code-complete head `4e62e0ecfad2075780b2fb53f7c5e6f3f4736b44`:
+- **237 Python tests, 0 failures**;
+- Python compile PASS;
+- dependency import PASS;
+- collector Docker PASS;
+- Node PASS;
+- full Postgres migrations PASS;
+- SQL013/016/017/018/019/020 regressions PASS.
 
-Full Python/Node/Docker/Postgres CI must pass before 4H is marked complete.
+See `docs/STEP4H_D_VERIFICATION.md`.
 
 ---
 
-# 4H completion gate
+# 4H completion gate — SATISFIED
 
-4H is complete only after H-D and full regressions pass. Then update:
+Step 4H-A through 4H-D are green. The settlement/validation layer is now adequate to audit the benchmark hard-edge chain without contaminating trade-time knowledge.
 
-- `docs/STEP4_CANONICAL_TODO.md`;
-- `docs/HARD_STATE_REFACTOR.md`;
-- a dedicated H-D/4H verification note;
+**Next: Step 4I — world-class debugging and explainability.**
 
-and advance to 4I. No merge/deploy occurs merely because 4H passes.
+No merge, Railway deployment, portfolio reset or real-money execution occurred.
 
 ## Explicitly deferred performance work
 
