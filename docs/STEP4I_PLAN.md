@@ -1,6 +1,6 @@
 # Step 4I plan — debugging and explainability
 
-Status: **LOCKED BEFORE IMPLEMENTATION**
+Status: **4I-A PASS on run 515 (242 Python tests + Node + Docker + Postgres). Next: 4I-B structured fail-closed event ledger.**
 
 Branch: `paper-rigour-v2`
 
@@ -9,6 +9,8 @@ PR: #5
 Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
 
 Prerequisite: Step 4H PASS on GitHub Actions run 501 (`32544466584`), 237 Python tests.
+
+Verification: `docs/STEP4I_A_VERIFICATION.md`.
 
 ## Goal
 
@@ -30,11 +32,14 @@ paper order / signal
 
 Explainability is a read/audit layer. It must not alter strategy decisions, hard state, settlement truth or benchmark P&L.
 
-## 4I-A — Canonical why trace + raw inspection
+## 4I-A — Canonical why trace + raw inspection — PASS
 
-Create a source-neutral explanation module that reconstructs a benchmark signal/order directly from persisted canonical objects.
+Implemented:
 
-Required output for an order/signal:
+- `paper_collector/explainability.py`
+- `paper_collector/test_explainability.py`
+
+For an order/signal the trace exposes and validates:
 
 - event ticker and traded market;
 - station and LST climate date;
@@ -46,23 +51,14 @@ Required output for an order/signal:
 - observation, source-publication, first-fetchable, Mercury receipt and interpretation clocks separately;
 - parser/evidence/calendar/state/elimination/execution versions;
 - immutable raw-source id and SHA-256 for every evidence input;
-- L2/execution identity for benchmark orders;
+- L2/execution identity;
 - settlement/audit identity when available.
 
-The explanation must never parse METAR, MADIS, DSM or CLI syntax. It reads canonical derivations and immutable provenance only.
+The explanation never parses METAR, MADIS, DSM or CLI syntax. Raw inspection returns exact bytes as base64 and emits UTF-8 only when decoding is lossless; the stored hash is independently verified.
 
-Raw inspection must support retrieving the exact stored `raw_bytes` for any raw-source id referenced by a trace. For JSON-safe output, preserve exact bytes as base64 and optionally expose UTF-8 text only when decoding is lossless.
+Acceptance is verified on GitHub Actions **run 515 (`32761450930`)**: **242 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013/016/017/018/019/020 PASS.
 
-### 4I-A acceptance
-
-- a known benchmark order reconstructs one deterministic explanation with exact state/elimination/evidence/raw links;
-- all supporting evidence records are included, not only the winning transition id;
-- raw hash in the explanation equals SHA-256 of the exact retrieved bytes;
-- source clocks remain distinct and are never backfilled from observation time;
-- same DB facts produce byte-identical canonical explanation JSON;
-- missing/mismatched canonical links fail closed instead of producing a partial authoritative trace.
-
-## 4I-B — Structured fail-closed event ledger
+## 4I-B — Structured fail-closed event ledger — NEXT
 
 Create one append-only normalized ledger for hard-edge failures/rejections so ambiguous inputs and blocked decisions can be counted by stage/reason instead of disappearing into logs.
 
@@ -87,7 +83,7 @@ Initial live integrations must cover at least:
 - bucket-elimination fail-closed results;
 - benchmark dead-NO execution blocks;
 - rejected/ambiguous validation products;
-- settlement auditor identity/invariant failures that are persisted outcomes.
+- settlement auditor invariant failures that are persisted outcomes.
 
 A query helper must return counts grouped by stage + reason code.
 
