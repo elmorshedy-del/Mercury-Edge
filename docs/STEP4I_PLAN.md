@@ -1,6 +1,6 @@
 # Step 4I plan — debugging and explainability
 
-Status: **4I-A PASS run 515; 4I-B PASS run 538 (255 Python tests + Node + Docker + Postgres). Next: 4I-C end-to-end explainability regression.**
+Status: **PASS — 4I-A run 515; 4I-B run 538; 4I-C run 547. Next: Step 4J deterministic replay.**
 
 Branch: `paper-rigour-v2`
 
@@ -13,6 +13,7 @@ Prerequisite: Step 4H PASS on GitHub Actions run 501 (`32544466584`), 237 Python
 Verification:
 - `docs/STEP4I_A_VERIFICATION.md`
 - `docs/STEP4I_B_VERIFICATION.md`
+- `docs/STEP4I_C_VERIFICATION.md`
 
 ## Goal
 
@@ -50,45 +51,36 @@ Implemented:
 - `paper_collector/failure_events.py`
 - `paper_collector/failure_event_sweeper.py`
 - `paper_collector/diagnostic_sweep.py`
-- unit/integration regressions and audit-daemon sweep wiring.
+- audit-daemon sweep wiring and regressions.
 
 The immutable ledger makes source/evidence/elimination/execution/validation/settlement failures countable by stable stage/disposition/reason while keeping ordinary economic skips distinct.
 
-Initial diagnostics cover:
-- ASOS off-lattice input;
-- main/T contradiction;
-- six-hour max below precise current;
-- six-hour interval crossing LST climate midnight;
-- benchmark-deferred 24-hour max evidence;
-- bucket-elimination fail-closed findings;
-- benchmark execution blocks;
-- ordinary economic no-edge/portfolio skips as a separate disposition;
-- rejected/ambiguous validation products with raw provenance;
-- settlement invariant failures with trade identity.
-
-Database UPDATE/DELETE is rejected with `55000`; same fact is idempotent; same identity/different payload fails closed.
+Diagnostics cover ASOS integrity/non-admission cases, bucket-elimination failures, execution blocks/economic skips, rejected validation products, and settlement invariant failures. Raw-linked events validate immutable provenance. UPDATE/DELETE is rejected with `55000`; same fact is idempotent; same identity/different payload fails closed.
 
 Verification: run **538 (`32762176090`)**, **255 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013-021 PASS.
 
-## 4I-C — End-to-end explainability regression — NEXT
+## 4I-C — End-to-end explainability regression — PASS
 
-Build a synthetic canonical benchmark case that includes:
+`paper_collector/test_explainability_postgres.py` creates a full canonical benchmark chain in a real migrated Postgres database:
 
 1. immutable raw ASOS response;
-2. accepted precise/six-hour evidence;
-3. hard-state transition;
+2. precise T-group + six-hour evidence;
+3. hard-state transition to >=88F;
 4. multiple dead buckets;
-5. exact eliminated market chosen for a paper order;
-6. causal L2 execution identity;
-7. exchange settlement result;
-8. settlement audit.
+5. exact eliminated market used by a paper order;
+6. causal L2 snapshot identity;
+7. immutable exchange settlement result;
+8. settlement audit;
+9. deterministic order explanation spanning the complete chain.
 
-The final order explanation must trace from order back to every raw evidence input and forward to settlement audit without source-specific re-parsing.
+The same test inserts malformed off-lattice `T0310` source evidence, proves a raw-linked `ASOS_OFF_LATTICE_EVIDENCE` diagnostic is retained, and proves the malformed record creates no evidence-source link capable of authorizing hard state.
 
-Also add a deliberately malformed ASOS case proving the structured failure ledger retains a countable reason code + raw provenance while producing no hard-state authorization.
+Verification: run **547 (`32762649239`)** — **255 standard Python tests, 0 failures**, compile/Docker/Node/Postgres, SQL013-021 and the dedicated real-Postgres end-to-end explainability regression all PASS.
 
-## Completion gate
+## Completion gate — SATISFIED
 
-Step 4I is PASS only after 4I-C and full Python/Node/Docker/Postgres CI are green. Then update the canonical TODO/refactor log and move to Step 4J deterministic replay.
+**Step 4I is PASS.** Mercury can now explain a benchmark order back to immutable raw evidence and forward to settlement audit, while rejected facts remain countable and inspectable.
 
-No merge or Railway deployment occurs merely because 4I passes.
+**Next: Step 4J — deterministic replay.**
+
+No merge or Railway deployment occurred.
