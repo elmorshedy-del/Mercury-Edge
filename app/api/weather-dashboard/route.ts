@@ -25,9 +25,14 @@ const VARS = [
   "metar",
 ].join(",");
 
+const USER_AGENT = process.env.SOURCE_USER_AGENT || "Mercury-Edge weather dashboard (weather trajectory research)";
 const NWS_HEADERS = {
-  "User-Agent": "Mercury-Edge weather dashboard (weather trajectory research)",
+  "User-Agent": USER_AGENT,
   Accept: "application/geo+json",
+};
+const AWC_HEADERS = {
+  "User-Agent": USER_AGENT,
+  Accept: "application/json",
 };
 
 type AnyRecord = Record<string, unknown>;
@@ -46,6 +51,8 @@ type Row = {
   low24: number | null;
   raw: string | null;
   kind: "hf" | "official" | "other";
+  source?: "synoptic" | "awc";
+  receivedAt?: string | null;
 };
 
 type ForecastPoint = { time: string; temp: number };
@@ -92,6 +99,31 @@ function str(value: unknown): string | null {
   return typeof value === "string" && value.length ? value : null;
 }
 
+function cToF(value: number | null) {
+  return value === null ? null : value * 9 / 5 + 32;
+}
+
+function hPaToInHg(value: number | null) {
+  return value === null ? null : value * 0.0295299830714;
+}
+
+function rhFromC(tempC: number | null, dewC: number | null) {
+  if (tempC === null || dewC === null) return null;
+  const a = 17.625;
+  const b = 243.04;
+  const saturation = Math.exp((a * tempC) / (b + tempC));
+  const actual = Math.exp((a * dewC) / (b + dewC));
+  return Math.max(0, Math.min(100, 100 * actual / saturation));
+}
+
+function parseSixHourFromRaw(raw: string | null, group: "1" | "2") {
+  if (!raw) return null;
+  const match = raw.match(new RegExp(`(?:^|\\s)${group}([01])(\\d{3})(?=\\s|$)`));
+  if (!match) return null;
+  const c = Number(match[2]) / 10 * (match[1] === "1" ? -1 : 1);
+  return cToF(c);
+}
+
 function classify(raw: string | null): Row["kind"] {
   if (!raw) return "other";
   if (/^METAR\s+K[A-Z]{3}\s/.test(raw) && !raw.includes(" RMK AO2")) return "hf";
@@ -132,6 +164,8 @@ function normalizeStation(station: AnyRecord) {
       low24: num(valueAt(obs, keys.low24, index)),
       raw,
       kind: classify(raw),
+      source: "synoptic",
+      receivedAt: null,
     };
   });
 
@@ -152,6 +186,93 @@ function normalizeStation(station: AnyRecord) {
     daily,
     hfAvailable: hf.length > 0,
   };
+}
+
+function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
+  const stid = str(item.icaoId);
+  if (!stid) return null;
+  const raw = str(item.rawOb);
+  const tempC = num(item.temp);
+  const dewC = num(item.dewp);
+  const obsTime = num(item.obsTime);
+  const time = obsTime !== null
+    ? new Date(obsTime * 1000).toISOString()
+    : str(item.reportTime) ?? str(item.receiptTime) ?? "";
+  if (!time) return null;
+
+  const maxFromRaw = parseSixHourFromRaw(raw, "1");
+  const minFromRaw = parseSixHourFromRaw(raw, "2");
+  const awcMax = cToF(num(item.maxT));
+  const awcMin = cToF(num(item.minT));
+
+  return {
+    stid,
+    row: {
+      time,
+      temp: cToF(tempC),
+      rh: rhFromC(tempC, dewC),
+      windSpeed: num(item.wspd),
+      windDirection: num(item.wdir),
+      altimeter: hPaToInHg(num(item.altim)),
+      seaLevelPressure: num(item.slp),
+      high6: maxFromRaw ?? awcMax,
+      low6: minFromRaw ?? awcMin,
+      high24: null,
+      low24: null,
+      raw,
+      kind: "official",
+      source: "awc",
+      receivedAt: str(item.receiptTime),
+    },
+  };
+}
+
+async function fetchAwcLatest() {
+  const url = new URL("https://aviationweather.gov/api/data/metar");
+  url.searchParams.set("ids", STATIONS.map((station) => station.stid).join(","));
+  url.searchParams.set("format", "json");
+
+  const response = await fetch(url, {
+    headers: AWC_HEADERS,
+    cache: "no-store",
+  });
+  if (response.status === 204) return new Map<string, Row>();
+  if (!response.ok) throw new Error(`AWC METAR request failed (${response.status})`);
+
+  const payload = await response.json();
+  const byStation = new Map<string, Row>();
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const normalized = normalizeAwc(item as AnyRecord);
+      if (!normalized) continue;
+      const existing = byStation.get(normalized.stid);
+      if (!existing || new Date(normalized.row.time).getTime() > new Date(existing.time).getTime()) {
+        byStation.set(normalized.stid, normalized.row);
+      }
+    }
+  }
+  return byStation;
+}
+
+function mergeAwc<T extends { latest: Row | null; official: Row[]; sixHour: Row[] }>(station: T, awc: Row | undefined): T {
+  if (!awc) return station;
+
+  const sameReport = (row: Row) => row.raw === awc.raw || Math.abs(new Date(row.time).getTime() - new Date(awc.time).getTime()) < 30_000;
+  const official = [awc, ...station.official.filter((row) => !sameReport(row))]
+    .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+    .slice(0, 18);
+
+  const sixHour = awc.high6 !== null || awc.low6 !== null
+    ? [awc, ...station.sixHour.filter((row) => !sameReport(row))]
+        .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+        .slice(0, 6)
+    : station.sixHour;
+
+  const latest = !station.latest || new Date(awc.time).getTime() >= new Date(station.latest.time).getTime()
+    ? awc
+    : station.latest;
+
+  return { ...station, official, sixHour, latest };
 }
 
 function localDate(timezone: string) {
@@ -298,8 +419,12 @@ export async function GET() {
   url.searchParams.set("token", token);
 
   try {
-    const [response, baselines] = await Promise.all([
+    const [response, awcByStation, baselines] = await Promise.all([
       fetch(url, { cache: "no-store" }),
+      fetchAwcLatest().catch((error) => {
+        console.error("AWC low-latency METAR fetch failed; falling back to Synoptic", error);
+        return new Map<string, Row>();
+      }),
       Promise.all(STATIONS.map((config) => getDailyBaseline(config))),
     ]);
     const payload = await response.json();
@@ -320,12 +445,13 @@ export async function GET() {
       const normalized = raw
         ? { ...config, ...normalizeStation(raw) }
         : { ...config, latest: null, hf: [], official: [], sixHour: [], daily: [], hfAvailable: false };
-      return { ...normalized, forecastBaseline: baselines[index] };
+      const lowLatency = mergeAwc(normalized, awcByStation.get(config.stid));
+      return { ...lowLatency, forecastBaseline: baselines[index] };
     });
 
     return NextResponse.json(
-      { updatedAt: new Date().toISOString(), stations },
-      { headers: { "Cache-Control": "no-store, max-age=0" } },
+      { updatedAt: new Date().toISOString(), stations, officialSource: "AWC-first / Synoptic-backup" },
+      { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } },
     );
   } catch (error) {
     return NextResponse.json(
