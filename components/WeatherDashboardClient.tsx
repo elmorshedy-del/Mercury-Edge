@@ -37,6 +37,28 @@ type DashboardData = {
   stations: Station[];
 };
 
+type TrajectoryPoint = {
+  minute: number;
+  temp: number;
+  kind: "observed" | "forecast";
+};
+
+const SEA_ORIGINAL = [
+  { minute: 11 * 60, temp: 66 },
+  { minute: 12 * 60, temp: 69 },
+  { minute: 13 * 60, temp: 71 },
+  { minute: 14 * 60, temp: 75 },
+  { minute: 15 * 60, temp: 76 },
+  { minute: 16 * 60, temp: 76 },
+  { minute: 17 * 60, temp: 78 },
+  { minute: 18 * 60, temp: 76 },
+  { minute: 19 * 60, temp: 75 },
+  { minute: 20 * 60, temp: 72 },
+  { minute: 21 * 60, temp: 68 },
+  { minute: 22 * 60, temp: 67 },
+  { minute: 23 * 60, temp: 66 },
+];
+
 function temp(value: number | null) {
   return value === null ? "—" : `${value.toFixed(1)}°F`;
 }
@@ -58,6 +80,22 @@ function timeLabel(iso: string, timezone: string | null) {
   }
 }
 
+function minuteOfDay(iso: string, timezone: string | null) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZone: timezone ?? undefined,
+    }).formatToParts(new Date(iso));
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+    return hour * 60 + minute;
+  } catch {
+    return null;
+  }
+}
+
 function windLabel(row: WeatherRow) {
   if (row.windSpeed === null && row.windDirection === null) return "—";
   const dir = row.windDirection === null ? "" : `${Math.round(row.windDirection)}°`;
@@ -67,11 +105,165 @@ function windLabel(row: WeatherRow) {
 
 function pollDelayMs() {
   const minute = new Date().getMinutes();
-  // All five stations report at roughly :51-:54. Six-hour max/min groups ride
-  // those same official METARs, so aggressively poll the whole release window.
   if (minute >= 49 || minute <= 2) return 2_000;
   if (minute >= 47) return 5_000;
   return 20_000;
+}
+
+function seaBaselineAt(minute: number) {
+  for (let i = 0; i < SEA_ORIGINAL.length - 1; i += 1) {
+    const left = SEA_ORIGINAL[i];
+    const right = SEA_ORIGINAL[i + 1];
+    if (minute >= left.minute && minute <= right.minute) {
+      const w = (minute - left.minute) / (right.minute - left.minute);
+      return left.temp + (right.temp - left.temp) * w;
+    }
+  }
+  return null;
+}
+
+function buildSeattleTrajectory(station: Station) {
+  const anchors = station.official
+    .filter((row) => row.temp !== null)
+    .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
+    .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
+    .filter((item) => item.minute % 60 >= 50)
+    .filter((item) => item.minute >= SEA_ORIGINAL[0].minute && item.minute <= SEA_ORIGINAL[SEA_ORIGINAL.length - 1].minute)
+    .sort((a, b) => a.minute - b.minute);
+
+  const residuals = anchors
+    .map((item) => {
+      const baseline = seaBaselineAt(item.minute);
+      if (baseline === null || item.row.temp === null) return null;
+      return { minute: item.minute, temp: item.row.temp, residual: item.row.temp - baseline };
+    })
+    .filter((item): item is { minute: number; temp: number; residual: number } => item !== null);
+
+  if (!residuals.length) return null;
+
+  const latest = residuals[residuals.length - 1];
+  const slopes: number[] = [];
+  for (let i = 1; i < residuals.length; i += 1) {
+    const hours = (residuals[i].minute - residuals[i - 1].minute) / 60;
+    if (hours > 0) slopes.push((residuals[i].residual - residuals[i - 1].residual) / hours);
+  }
+
+  const recent = slopes.slice(-3).reverse();
+  const weights = [0.5, 0.3, 0.2];
+  let momentum = recent.reduce((sum, slope, index) => sum + slope * weights[index], 0);
+  momentum *= 0.5;
+  momentum = Math.max(-1.5, Math.min(1.5, momentum));
+
+  const levelHalfLifeHours = 3;
+  const momentumHalfLifeHours = 1;
+  const levelLambda = Math.log(2) / levelHalfLifeHours;
+  const momentumLambda = Math.log(2) / momentumHalfLifeHours;
+
+  const points: TrajectoryPoint[] = residuals.map((item) => ({
+    minute: item.minute,
+    temp: item.temp,
+    kind: "observed",
+  }));
+
+  for (let minute = latest.minute + 60; minute <= 20 * 60 + 53; minute += 60) {
+    const baseline = seaBaselineAt(minute);
+    if (baseline === null) continue;
+    const dtHours = (minute - latest.minute) / 60;
+    const residual =
+      latest.residual * Math.exp(-levelLambda * dtHours) +
+      momentum * dtHours * Math.exp(-momentumLambda * dtHours);
+    points.push({ minute, temp: baseline + residual, kind: "forecast" });
+  }
+
+  const future = points.filter((point) => point.kind === "forecast");
+  const peak = future.length ? future.reduce((best, point) => (point.temp > best.temp ? point : best), future[0]) : null;
+
+  return {
+    points,
+    latestResidual: latest.residual,
+    momentum,
+    peak,
+  };
+}
+
+function clockLabel(minute: number) {
+  const h24 = Math.floor(minute / 60) % 24;
+  const m = minute % 60;
+  const suffix = h24 >= 12 ? "PM" : "AM";
+  const h = h24 % 12 || 12;
+  return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+function SeattleTrajectory({ station }: { station: Station }) {
+  const model = useMemo(() => buildSeattleTrajectory(station), [station]);
+  if (!model) return null;
+
+  const baseline = SEA_ORIGINAL.filter((point) => point.minute >= 11 * 60 && point.minute <= 21 * 60);
+  const allTemps = [...baseline.map((p) => p.temp), ...model.points.map((p) => p.temp)];
+  const yMin = Math.floor(Math.min(...allTemps) - 1);
+  const yMax = Math.ceil(Math.max(...allTemps) + 1);
+  const xMin = 11 * 60;
+  const xMax = 21 * 60;
+  const width = 700;
+  const height = 280;
+  const pad = { left: 42, right: 16, top: 18, bottom: 34 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const x = (minute: number) => pad.left + ((minute - xMin) / (xMax - xMin)) * plotW;
+  const y = (t: number) => pad.top + ((yMax - t) / (yMax - yMin)) * plotH;
+  const line = (pts: { minute: number; temp: number }[]) => pts.map((p) => `${x(p.minute)},${y(p.temp)}`).join(" ");
+  const ticks = [11, 13, 15, 17, 19, 21];
+  const observed = model.points.filter((p) => p.kind === "observed");
+  const projected = model.points.filter((p) => p.kind === "forecast");
+  const adaptive = projected.length && observed.length ? [observed[observed.length - 1], ...projected] : projected;
+
+  return (
+    <section className={styles.trajectoryBlock}>
+      <div className={styles.sectionTitle}>
+        <div>
+          <span>Adaptive trajectory</span>
+          <h3>Original NWS vs hourly-adjusted</h3>
+        </div>
+        <small>Seattle · original NWS curve issued 11:26 AM PDT</small>
+      </div>
+
+      <div className={styles.trajectoryStats}>
+        <div><span>Latest deviation</span><b>{model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</b></div>
+        <div><span>Residual momentum</span><b>{model.momentum >= 0 ? "+" : ""}{model.momentum.toFixed(1)}°F/hr</b></div>
+        <div><span>Adaptive peak</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}°F` : "—"}</b></div>
+        <div><span>Peak time</span><b>{model.peak ? clockLabel(model.peak.minute) : "—"}</b></div>
+      </div>
+
+      <div className={styles.trajectoryLegend}>
+        <span><i className={styles.legendOriginal} />Original NWS</span>
+        <span><i className={styles.legendObserved} />Precise hourly</span>
+        <span><i className={styles.legendAdaptive} />Adaptive future</span>
+      </div>
+
+      <div className={styles.chartScroll}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Seattle original NWS temperature curve, precise hourly observations, and adaptive future trajectory">
+          {[yMin, Math.round((yMin + yMax) / 2), yMax].map((tick) => (
+            <g key={tick}>
+              <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
+              <text x={pad.left - 8} y={y(tick) + 4} textAnchor="end" className={styles.axisText}>{tick}°</text>
+            </g>
+          ))}
+          {ticks.map((hour) => (
+            <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={styles.axisText}>{hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}</text>
+          ))}
+          <polyline points={line(baseline)} className={styles.originalLine} />
+          {observed.length > 1 && <polyline points={line(observed)} className={styles.observedLine} />}
+          {adaptive.length > 1 && <polyline points={line(adaptive)} className={styles.adaptiveLine} />}
+          {observed.map((point) => <circle key={`o-${point.minute}`} cx={x(point.minute)} cy={y(point.temp)} r="4" className={styles.observedDot} />)}
+          {projected.map((point) => <circle key={`f-${point.minute}`} cx={x(point.minute)} cy={y(point.temp)} r="3.5" className={styles.adaptiveDot} />)}
+        </svg>
+      </div>
+
+      <p className={styles.trajectoryNote}>
+        Prototype logic: each precise hourly report re-estimates the deviation from the original curve. The deviation can expand or shrink; future deviation mean-reverts gradually while recent residual momentum decays faster. This allows a day to diverge, re-couple, then diverge again instead of forcing a fixed parallel shift.
+      </p>
+    </section>
+  );
 }
 
 function TableShell({ children }: { children: React.ReactNode }) {
@@ -113,6 +305,8 @@ function StationCard({ station }: { station: Station }) {
           <code>{station.latest.raw}</code>
         </details>
       )}
+
+      {station.stid === "KSEA" && <SeattleTrajectory station={station} />}
 
       <section className={styles.sectionBlock}>
         <div className={styles.sectionTitle}>
