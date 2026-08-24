@@ -1,6 +1,6 @@
 # Step 4J plan — deterministic replay as a first-class capability
 
-Status: **4J-A PASS on run 561 (264 Python tests + Node + Docker + Postgres). Next: 4J-B canonical hard-state / elimination reconstruction.**
+Status: **4J-A PASS run 561; 4J-B PASS run 575 (272 Python tests + Node + Docker + Postgres). Next: 4J-C exact market/execution replay.**
 
 Branch: `paper-rigour-v2`
 
@@ -12,6 +12,8 @@ Prerequisite: Step 4I PASS; final docs-only verification run 551 (`32762827396`)
 
 Verification:
 - `docs/STEP4J_A_VERIFICATION.md`
+- `docs/STEP4J_B_VERIFICATION.md`
+- `docs/STEP4J_B_DESIGN_NOTE.md`
 
 ## Goal
 
@@ -68,33 +70,19 @@ Acceptance verified on GitHub Actions **run 561 (`32764624225`)**: **264 Python 
 
 ---
 
-# 4J-B — Canonical hard-state / elimination reconstruction — NEXT
+# 4J-B — Canonical hard-state / elimination reconstruction — PASS
 
-Replay weather source bytes through the selected parser/evidence/calendar/accumulator/elimination bundle rather than reading historical `hard_state_transitions` as if they were inputs.
+Implemented:
+- `paper_collector/replay_hard_state.py`
+- `paper_collector/test_replay_hard_state.py`
 
-For the current benchmark version:
+Exact immutable AWC batch bytes are reparsed through the current parser/calendar/evidence/accumulator/elimination stack. Prior evidence derivations and hard-state transitions never seed replay. The current v1 historical `weather_id` is recovered only through the strict identity-only rule documented in `docs/STEP4J_B_DESIGN_NOTE.md` so current state ids remain exactly reproducible without consuming decoded weather values.
 
-- replay ASOS current/T/six-hour evidence using immutable raw capture bytes and the fixed LST calendar;
-- 24-hour max remains non-admitted under current benchmark policy;
-- use exact event/rule metadata available as-of each hard-state transition;
-- build hard state monotonically from replay-known evidence;
-- run pure `bucket_elimination.evaluate_event(...)` against only rule snapshots causally available then.
-
-Historical persisted derivations/transitions may be compared as expected outputs, but they are never allowed to seed the reconstructed state.
-
-### 4J-B acceptance
-
-- known ASOS stream reproduces the same transition sequence/state ids under the same versions;
-- same-response current + hidden six-hour max remains atomic strongest transition;
-- later lower temperature cannot reduce state;
-- wrong-date Aug18/Aug19 event remains impossible to route;
-- a future rule snapshot cannot eliminate a bucket earlier;
-- replay with no causally valid rule snapshot produces no authoritative elimination;
-- archive-derived/research-only evidence cannot contaminate benchmark hard state.
+Acceptance verified on GitHub Actions **run 575 (`32765146488`)**: **272 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013/016/017/018/019/020/021 PASS. See `docs/STEP4J_B_VERIFICATION.md`.
 
 ---
 
-# 4J-C — Exact market/execution replay and A/B version selection
+# 4J-C — Exact market/execution replay and A/B version selection — NEXT
 
 At each reconstructed elimination, recreate the configured benchmark decision using exact causal L2 only.
 
