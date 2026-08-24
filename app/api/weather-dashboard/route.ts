@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
+import { hasDatabase, query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 const STATIONS = [
-  { stid: "KNYC", city: "NYC", name: "Central Park" },
-  { stid: "KPHL", city: "PHL", name: "Philadelphia" },
-  { stid: "KLAX", city: "LA", name: "Los Angeles" },
-  { stid: "KDEN", city: "Denver", name: "Denver" },
-  { stid: "KSEA", city: "Seattle", name: "Seattle" },
+  { stid: "KNYC", city: "NYC", name: "Central Park", lat: 40.7789, lon: -73.9692, timezone: "America/New_York" },
+  { stid: "KPHL", city: "PHL", name: "Philadelphia", lat: 39.8721, lon: -75.2411, timezone: "America/New_York" },
+  { stid: "KLAX", city: "LA", name: "Los Angeles", lat: 33.9425, lon: -118.4081, timezone: "America/Los_Angeles" },
+  { stid: "KDEN", city: "Denver", name: "Denver", lat: 39.8561, lon: -104.6737, timezone: "America/Denver" },
+  { stid: "KSEA", city: "Seattle", name: "Seattle", lat: 47.4447, lon: -122.3136, timezone: "America/Los_Angeles" },
 ];
 
 const VARS = [
@@ -23,6 +24,11 @@ const VARS = [
   "air_temp_low_24_hour",
   "metar",
 ].join(",");
+
+const NWS_HEADERS = {
+  "User-Agent": "Mercury-Edge weather dashboard (weather trajectory research)",
+  Accept: "application/geo+json",
+};
 
 type AnyRecord = Record<string, unknown>;
 
@@ -41,6 +47,32 @@ type Row = {
   raw: string | null;
   kind: "hf" | "official" | "other";
 };
+
+type ForecastPoint = { time: string; temp: number };
+type ForecastBaseline = {
+  localDate: string;
+  issuedAt: string | null;
+  capturedAt: string;
+  points: ForecastPoint[];
+};
+
+type BaselineDbRow = {
+  local_date: string;
+  issued_at: Date | null;
+  captured_at: Date;
+  points: ForecastPoint[];
+};
+
+declare global {
+  var weatherBaselineMemory: Map<string, ForecastBaseline> | undefined;
+  var weatherPointsMemory: Map<string, { forecastHourly: string; expires: number }> | undefined;
+  var weatherBaselineTableReady: Promise<void> | undefined;
+}
+
+const baselineMemory = global.weatherBaselineMemory ?? new Map<string, ForecastBaseline>();
+const pointsMemory = global.weatherPointsMemory ?? new Map<string, { forecastHourly: string; expires: number }>();
+if (!global.weatherBaselineMemory) global.weatherBaselineMemory = baselineMemory;
+if (!global.weatherPointsMemory) global.weatherPointsMemory = pointsMemory;
 
 function keyFor(obs: AnyRecord, prefix: string) {
   return Object.keys(obs).find((key) => key.startsWith(prefix)) ?? null;
@@ -105,7 +137,7 @@ function normalizeStation(station: AnyRecord) {
 
   const latest = [...rows].reverse().find((row) => row.temp !== null || row.raw) ?? null;
   const hf = rows.filter((row) => row.kind === "hf").slice(-24).reverse();
-  const official = rows.filter((row) => row.kind === "official").slice(-12).reverse();
+  const official = rows.filter((row) => row.kind === "official").slice(-18).reverse();
   const sixHour = rows.filter((row) => row.high6 !== null || row.low6 !== null).slice(-6).reverse();
   const daily = rows.filter((row) => row.high24 !== null || row.low24 !== null).slice(-4).reverse();
 
@@ -122,6 +154,132 @@ function normalizeStation(station: AnyRecord) {
   };
 }
 
+function localDate(timezone: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+async function ensureBaselineTable() {
+  if (!hasDatabase) return;
+  if (!global.weatherBaselineTableReady) {
+    global.weatherBaselineTableReady = (async () => {
+      await query(`
+        CREATE TABLE IF NOT EXISTS weather_trajectory_baselines (
+          stid text NOT NULL,
+          local_date date NOT NULL,
+          timezone text NOT NULL,
+          issued_at timestamptz,
+          captured_at timestamptz NOT NULL DEFAULT now(),
+          points jsonb NOT NULL,
+          PRIMARY KEY (stid, local_date)
+        )
+      `);
+    })();
+  }
+  await global.weatherBaselineTableReady;
+}
+
+async function forecastHourlyUrl(config: (typeof STATIONS)[number]) {
+  const cached = pointsMemory.get(config.stid);
+  if (cached && cached.expires > Date.now()) return cached.forecastHourly;
+
+  const response = await fetch(`https://api.weather.gov/points/${config.lat},${config.lon}`, {
+    headers: NWS_HEADERS,
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`NWS points request failed for ${config.stid}`);
+  const payload = await response.json();
+  const url = payload?.properties?.forecastHourly;
+  if (typeof url !== "string") throw new Error(`NWS hourly forecast URL missing for ${config.stid}`);
+  pointsMemory.set(config.stid, { forecastHourly: url, expires: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+  return url;
+}
+
+async function fetchCurrentForecast(config: (typeof STATIONS)[number]): Promise<ForecastBaseline> {
+  const url = await forecastHourlyUrl(config);
+  const response = await fetch(url, { headers: NWS_HEADERS, cache: "no-store" });
+  if (!response.ok) throw new Error(`NWS hourly forecast failed for ${config.stid}`);
+  const payload = await response.json();
+  const periods = Array.isArray(payload?.properties?.periods) ? payload.properties.periods : [];
+  const date = localDate(config.timezone);
+  const points: ForecastPoint[] = periods
+    .map((period: AnyRecord) => {
+      const time = str(period.startTime);
+      const rawTemp = num(period.temperature);
+      const unit = str(period.temperatureUnit);
+      if (!time || rawTemp === null) return null;
+      const pointDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: config.timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date(time));
+      if (pointDate !== date) return null;
+      const temp = unit === "C" ? rawTemp * 9 / 5 + 32 : rawTemp;
+      return { time, temp };
+    })
+    .filter((point: ForecastPoint | null): point is ForecastPoint => point !== null);
+
+  return {
+    localDate: date,
+    issuedAt: str(payload?.properties?.updateTime),
+    capturedAt: new Date().toISOString(),
+    points,
+  };
+}
+
+async function getDailyBaseline(config: (typeof STATIONS)[number]): Promise<ForecastBaseline | null> {
+  const date = localDate(config.timezone);
+  const cacheKey = `${config.stid}:${date}`;
+  const inMemory = baselineMemory.get(cacheKey);
+  if (inMemory) return inMemory;
+
+  try {
+    await ensureBaselineTable();
+    if (hasDatabase) {
+      const existing = await query<BaselineDbRow>(
+        `SELECT local_date::text, issued_at, captured_at, points
+         FROM weather_trajectory_baselines
+         WHERE stid = $1 AND local_date = $2::date`,
+        [config.stid, date],
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        const baseline: ForecastBaseline = {
+          localDate: row.local_date,
+          issuedAt: row.issued_at ? row.issued_at.toISOString() : null,
+          capturedAt: row.captured_at.toISOString(),
+          points: row.points,
+        };
+        baselineMemory.set(cacheKey, baseline);
+        return baseline;
+      }
+    }
+
+    const fresh = await fetchCurrentForecast(config);
+    if (!fresh.points.length) return null;
+
+    if (hasDatabase) {
+      await query(
+        `INSERT INTO weather_trajectory_baselines (stid, local_date, timezone, issued_at, captured_at, points)
+         VALUES ($1, $2::date, $3, $4::timestamptz, $5::timestamptz, $6::jsonb)
+         ON CONFLICT (stid, local_date) DO NOTHING`,
+        [config.stid, fresh.localDate, config.timezone, fresh.issuedAt, fresh.capturedAt, JSON.stringify(fresh.points)],
+      );
+    }
+
+    baselineMemory.set(cacheKey, fresh);
+    return fresh;
+  } catch (error) {
+    console.error(`Unable to build NWS baseline for ${config.stid}`, error);
+    return null;
+  }
+}
+
 export async function GET() {
   const token = process.env.SYNOPTIC_TOKEN;
   if (!token) {
@@ -130,7 +288,7 @@ export async function GET() {
 
   const url = new URL("https://api.synopticdata.com/v2/stations/timeseries");
   url.searchParams.set("stid", STATIONS.map((s) => s.stid).join(","));
-  url.searchParams.set("recent", "900");
+  url.searchParams.set("recent", "1080");
   url.searchParams.set("vars", VARS);
   url.searchParams.set("units", "english");
   url.searchParams.set("obtimezone", "local");
@@ -140,7 +298,10 @@ export async function GET() {
   url.searchParams.set("token", token);
 
   try {
-    const response = await fetch(url, { cache: "no-store" });
+    const [response, baselines] = await Promise.all([
+      fetch(url, { cache: "no-store" }),
+      Promise.all(STATIONS.map((config) => getDailyBaseline(config))),
+    ]);
     const payload = await response.json();
 
     if (!response.ok || payload?.SUMMARY?.RESPONSE_CODE !== 1) {
@@ -154,17 +315,18 @@ export async function GET() {
       (payload.STATION ?? []).map((station: AnyRecord) => [String(station.STID), station]),
     );
 
-    const stations = STATIONS.map((config) => {
+    const stations = STATIONS.map((config, index) => {
       const raw = byId.get(config.stid);
-      return raw
+      const normalized = raw
         ? { ...config, ...normalizeStation(raw) }
-        : { ...config, timezone: null, latest: null, hf: [], official: [], sixHour: [], daily: [], hfAvailable: false };
+        : { ...config, latest: null, hf: [], official: [], sixHour: [], daily: [], hfAvailable: false };
+      return { ...normalized, forecastBaseline: baselines[index] };
     });
 
-    return NextResponse.json({
-      updatedAt: new Date().toISOString(),
-      stations,
-    });
+    return NextResponse.json(
+      { updatedAt: new Date().toISOString(), stations },
+      { headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unable to fetch weather data" },
