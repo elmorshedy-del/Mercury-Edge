@@ -1,6 +1,6 @@
 # Step 4I plan — debugging and explainability
 
-Status: **4I-A PASS on run 515 (242 Python tests + Node + Docker + Postgres). Next: 4I-B structured fail-closed event ledger.**
+Status: **4I-A PASS run 515; 4I-B PASS run 538 (255 Python tests + Node + Docker + Postgres). Next: 4I-C end-to-end explainability regression.**
 
 Branch: `paper-rigour-v2`
 
@@ -10,13 +10,13 @@ Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
 
 Prerequisite: Step 4H PASS on GitHub Actions run 501 (`32544466584`), 237 Python tests.
 
-Verification: `docs/STEP4I_A_VERIFICATION.md`.
+Verification:
+- `docs/STEP4I_A_VERIFICATION.md`
+- `docs/STEP4I_B_VERIFICATION.md`
 
 ## Goal
 
 A Mercury benchmark trade must be explainable from one stable query without re-running source parsers or guessing what happened.
-
-The explanation chain is:
 
 ```text
 paper order / signal
@@ -35,68 +35,42 @@ Explainability is a read/audit layer. It must not alter strategy decisions, hard
 ## 4I-A — Canonical why trace + raw inspection — PASS
 
 Implemented:
-
 - `paper_collector/explainability.py`
 - `paper_collector/test_explainability.py`
 
-For an order/signal the trace exposes and validates:
+The trace exposes and validates event/market/station/date, hard state and bound, transition plus all supporting evidence, exact elimination/dead set, raw identifiers and canonical Fahrenheit interpretation, distinct clocks, software/model versions, immutable raw-source ids/hashes, execution identity and settlement audits. It never reparses source syntax. Exact raw bytes are inspectable with independent SHA-256 verification.
 
-- event ticker and traded market;
-- station and LST climate date;
-- hard-state id and newly proven lower bound;
-- transition evidence id and all supporting evidence ids;
-- newly dead market set and exact elimination proof/strike rule;
-- evidence type/source;
-- raw evidence identifier/group/value and canonical Fahrenheit interpretation;
-- observation, source-publication, first-fetchable, Mercury receipt and interpretation clocks separately;
-- parser/evidence/calendar/state/elimination/execution versions;
-- immutable raw-source id and SHA-256 for every evidence input;
-- L2/execution identity;
-- settlement/audit identity when available.
+Verification: run **515 (`32761450930`)**, **242 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013-020 PASS.
 
-The explanation never parses METAR, MADIS, DSM or CLI syntax. Raw inspection returns exact bytes as base64 and emits UTF-8 only when decoding is lossless; the stored hash is independently verified.
+## 4I-B — Structured fail-closed event ledger — PASS
 
-Acceptance is verified on GitHub Actions **run 515 (`32761450930`)**: **242 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013/016/017/018/019/020 PASS.
+Implemented:
+- `sql/021_hard_edge_failure_events.sql`
+- `sql/tests/021_hard_edge_failure_events_test.sql`
+- `paper_collector/failure_events.py`
+- `paper_collector/failure_event_sweeper.py`
+- `paper_collector/diagnostic_sweep.py`
+- unit/integration regressions and audit-daemon sweep wiring.
 
-## 4I-B — Structured fail-closed event ledger — NEXT
+The immutable ledger makes source/evidence/elimination/execution/validation/settlement failures countable by stable stage/disposition/reason while keeping ordinary economic skips distinct.
 
-Create one append-only normalized ledger for hard-edge failures/rejections so ambiguous inputs and blocked decisions can be counted by stage/reason instead of disappearing into logs.
+Initial diagnostics cover:
+- ASOS off-lattice input;
+- main/T contradiction;
+- six-hour max below precise current;
+- six-hour interval crossing LST climate midnight;
+- benchmark-deferred 24-hour max evidence;
+- bucket-elimination fail-closed findings;
+- benchmark execution blocks;
+- ordinary economic no-edge/portfolio skips as a separate disposition;
+- rejected/ambiguous validation products with raw provenance;
+- settlement invariant failures with trade identity.
 
-Canonical fields:
+Database UPDATE/DELETE is rejected with `55000`; same fact is idempotent; same identity/different payload fails closed.
 
-- deterministic failure id;
-- session;
-- stage (`source_parse`, `evidence`, `hard_state`, `elimination`, `execution`, `validation`, `settlement`, `replay`);
-- stable reason code;
-- station/climate date/event/market when known;
-- raw source id/evidence id/state id/elimination id/signal id/order id when known;
-- occurred/known time;
-- structured details;
-- failure model version + canonical payload hash.
+Verification: run **538 (`32762176090`)**, **255 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013-021 PASS.
 
-Database UPDATE/DELETE must be rejected.
-
-Initial live integrations must cover at least:
-
-- incoherent/off-lattice ASOS hard-state source rows;
-- invalid six-hour climate-window evidence and intentionally isolated 24-hour max evidence as explicit non-admission reasons where encountered;
-- bucket-elimination fail-closed results;
-- benchmark dead-NO execution blocks;
-- rejected/ambiguous validation products;
-- settlement auditor invariant failures that are persisted outcomes.
-
-A query helper must return counts grouped by stage + reason code.
-
-### 4I-B acceptance
-
-- same failure fact is idempotent;
-- same stable identity with different canonical payload fails closed;
-- raw-linked failures preserve exact raw provenance;
-- SQL mutation attempts fail with `55000`;
-- reason counts are deterministic;
-- ordinary `no edge` decisions are distinguishable from integrity/fail-closed failures.
-
-## 4I-C — End-to-end explainability regression
+## 4I-C — End-to-end explainability regression — NEXT
 
 Build a synthetic canonical benchmark case that includes:
 
@@ -115,6 +89,6 @@ Also add a deliberately malformed ASOS case proving the structured failure ledge
 
 ## Completion gate
 
-Step 4I is PASS only after A-C, full Python/Node/Docker/Postgres CI and immutable failure-ledger regression are green. Then update the canonical TODO/refactor log and move to Step 4J deterministic replay.
+Step 4I is PASS only after 4I-C and full Python/Node/Docker/Postgres CI are green. Then update the canonical TODO/refactor log and move to Step 4J deterministic replay.
 
 No merge or Railway deployment occurs merely because 4I passes.
