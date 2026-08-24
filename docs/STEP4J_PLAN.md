@@ -1,6 +1,6 @@
 # Step 4J plan — deterministic replay as a first-class capability
 
-Status: **LOCKED BEFORE IMPLEMENTATION**
+Status: **4J-A PASS on run 561 (264 Python tests + Node + Docker + Postgres). Next: 4J-B canonical hard-state / elimination reconstruction.**
 
 Branch: `paper-rigour-v2`
 
@@ -9,6 +9,9 @@ PR: #5
 Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
 
 Prerequisite: Step 4I PASS; final docs-only verification run 551 (`32762827396`) is fully green.
+
+Verification:
+- `docs/STEP4J_A_VERIFICATION.md`
 
 ## Goal
 
@@ -53,58 +56,19 @@ Replay is a new derivation over immutable source data. It must never mutate the 
 
 ---
 
-# 4J-A — Causal replay manifest and event stream
+# 4J-A — Causal replay manifest and event stream — PASS
 
-Implement a source-neutral replay contract before strategy reconstruction.
+Implemented:
+- `paper_collector/replay_domain.py`
+- `paper_collector/test_replay_domain.py`
 
-Required concepts:
+The source-neutral replay contract normalizes immutable raw source captures, Kalshi market messages, rule snapshots, transport continuity events, validation products and later exchange settlement captures into deterministic causal events.
 
-- `ReplayVersionBundle`
-  - parser version;
-  - calendar version;
-  - evidence model version;
-  - hard-state accumulator version;
-  - elimination version;
-  - execution version;
-  - replay engine version.
-- `ReplayManifest`
-  - source session;
-  - station/event/date filter;
-  - explicit version bundle;
-  - benchmark/research policy;
-  - deterministic input-range/hash summary.
-- `ReplayEvent`
-  - source kind;
-  - immutable source id;
-  - causal available-at time / epoch-ns when available;
-  - deterministic tie-break key;
-  - payload hash/provenance;
-  - live-causal/archive classification.
-
-Input event types must include at minimum:
-
-- immutable raw weather/source captures;
-- Kalshi market journal messages;
-- rule snapshots;
-- source transport gap/reconnect events;
-- validation products / exchange settlement captures as later audit events where present.
-
-### 4J-A acceptance
-
-- events sort deterministically independent of SQL return order;
-- `observed_at` cannot move an event earlier than Mercury receipt;
-- a physically old MADIS archive import received later remains later in replay;
-- live MADIS and archive MADIS are distinguishable in the event contract;
-- rule snapshots cannot appear before `captured_at`;
-- market messages use Mercury receipt order with stable id/sequence tie-breaks;
-- identical source session + filters + version bundle yields identical manifest/input hash;
-- changing only a component version changes the replay manifest identity without changing source-input hash.
-
-Full CI must pass before 4J-A is marked complete.
+Acceptance verified on GitHub Actions **run 561 (`32764624225`)**: **264 Python tests, 0 failures**, compile/Docker/Node/Postgres and SQL013/016/017/018/019/020/021 PASS. See `docs/STEP4J_A_VERIFICATION.md`.
 
 ---
 
-# 4J-B — Canonical hard-state / elimination reconstruction
+# 4J-B — Canonical hard-state / elimination reconstruction — NEXT
 
 Replay weather source bytes through the selected parser/evidence/calendar/accumulator/elimination bundle rather than reading historical `hard_state_transitions` as if they were inputs.
 
