@@ -65,6 +65,15 @@ function windLabel(row: WeatherRow) {
   return [dir, speed].filter(Boolean).join(" · ");
 }
 
+function pollDelayMs() {
+  const minute = new Date().getMinutes();
+  // All five stations report at roughly :51-:54. Six-hour max/min groups ride
+  // those same official METARs, so aggressively poll the whole release window.
+  if (minute >= 49 || minute <= 2) return 2_000;
+  if (minute >= 47) return 5_000;
+  return 20_000;
+}
+
 function TableShell({ children }: { children: React.ReactNode }) {
   return <div className={styles.tableScroll}>{children}</div>;
 }
@@ -196,7 +205,10 @@ export function WeatherDashboardClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/weather-dashboard", { cache: "no-store" });
+      const response = await fetch(`/api/weather-dashboard?ts=${Date.now()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
       const next = await response.json();
       if (!response.ok) throw new Error(next.error ?? "Weather request failed");
       setData(next);
@@ -209,15 +221,30 @@ export function WeatherDashboardClient() {
   }, []);
 
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 30_000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const tick = async () => {
+      await load();
+      if (!cancelled) timer = window.setTimeout(tick, pollDelayMs());
+    };
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [load]);
 
   const visible = useMemo(() => {
     if (!data) return [];
     return all ? data.stations : data.stations.filter((station) => station.stid === selected);
   }, [all, data, selected]);
+
+  const rapid = (() => {
+    const minute = new Date().getMinutes();
+    return minute >= 49 || minute <= 2;
+  })();
 
   return (
     <div className={styles.dashboard}>
@@ -246,7 +273,7 @@ export function WeatherDashboardClient() {
 
       <div className={styles.statusLine}>
         <span className={error ? styles.badDot : styles.goodDot} />
-        {error ? error : data ? `Live · refreshed ${new Date(data.updatedAt).toLocaleTimeString()}` : "Connecting to Synoptic…"}
+        {error ? error : data ? `${rapid ? "Rapid 2s official-report polling" : "Live"} · refreshed ${new Date(data.updatedAt).toLocaleTimeString()}` : "Connecting to Synoptic…"}
       </div>
 
       <div className={styles.notice}>
