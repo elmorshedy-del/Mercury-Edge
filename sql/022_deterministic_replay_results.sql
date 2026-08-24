@@ -22,9 +22,12 @@ CREATE TABLE IF NOT EXISTS deterministic_replay_results (
   replay_payload_sha256 text NOT NULL CHECK (replay_payload_sha256 ~ '^[0-9a-f]{64}$'),
   replay_model_version text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
+  -- A later settlement correction/revision is a new immutable derivation, not
+  -- a mutation of the earlier replay result. The settlement-grade hash is
+  -- therefore part of the logical uniqueness key.
   UNIQUE (
     source_session_id, manifest_id, replay_policy,
-    execution_config_sha256, replay_model_version
+    execution_config_sha256, settlement_grade_sha256, replay_model_version
   )
 );
 
