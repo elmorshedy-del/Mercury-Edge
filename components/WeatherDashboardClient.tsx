@@ -46,7 +46,8 @@ type DashboardData = {
 };
 
 type LocalPoint = { minute: number; temp: number };
-type ResidualPoint = LocalPoint & { residual: number };
+type ObservedPoint = LocalPoint & { time: string };
+type ResidualPoint = LocalPoint & { residual: number; time: string };
 type ProjectedPoint = LocalPoint & { kind: "forecast" };
 
 function temp(value: number | null) {
@@ -85,12 +86,16 @@ function shortTimeLabel(iso: string, timezone: string | null) {
 
 function localDateLabel(iso: string, timezone: string | null) {
   try {
-    return new Intl.DateTimeFormat("en-CA", {
+    const parts = new Intl.DateTimeFormat("en-US", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
       timeZone: timezone ?? undefined,
-    }).format(new Date(iso));
+    }).formatToParts(new Date(iso));
+    const year = parts.find((part) => part.type === "year")?.value;
+    const month = parts.find((part) => part.type === "month")?.value;
+    const day = parts.find((part) => part.type === "day")?.value;
+    return year && month && day ? `${year}-${month}-${day}` : "";
   } catch {
     return "";
   }
@@ -126,10 +131,11 @@ function pollDelayMs() {
   return 20_000;
 }
 
-function interpolateBaseline(points: LocalPoint[], minute: number) {
+function baselineAt(points: LocalPoint[], minute: number) {
   if (!points.length) return null;
   const exact = points.find((point) => point.minute === minute);
   if (exact) return exact.temp;
+
   for (let index = 0; index < points.length - 1; index += 1) {
     const left = points[index];
     const right = points[index + 1];
@@ -139,6 +145,23 @@ function interpolateBaseline(points: LocalPoint[], minute: number) {
       const weight = (minute - left.minute) / width;
       return left.temp + (right.temp - left.temp) * weight;
     }
+  }
+
+  // NWS hourly API only returns the still-active/future part of the day when a
+  // baseline is first captured late. Permit a small edge extrapolation so a
+  // routine METAR immediately before the first forecast hour can anchor the
+  // adaptive line. Never extrapolate more than 90 minutes.
+  if (points.length >= 2 && minute < points[0].minute && points[0].minute - minute <= 90) {
+    const left = points[0];
+    const right = points[1];
+    const width = right.minute - left.minute;
+    if (width > 0) return left.temp + ((minute - left.minute) / width) * (right.temp - left.temp);
+  }
+  if (points.length >= 2 && minute > points[points.length - 1].minute && minute - points[points.length - 1].minute <= 90) {
+    const left = points[points.length - 2];
+    const right = points[points.length - 1];
+    const width = right.minute - left.minute;
+    if (width > 0) return right.temp + ((minute - right.minute) / width) * (right.temp - left.temp);
   }
   return null;
 }
@@ -209,30 +232,60 @@ function buildTrajectory(station: Station) {
   if (baselinePoints.length < 2) return null;
 
   const routineMinute = inferRoutineMinute(station.official, station.timezone);
-  const anchors = station.official
+  const todayOfficial = station.official
     .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === baseline.localDate)
     .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
     .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
-    .filter((item) => routineMinute === null || circularMinuteDistance(item.minute % 60, routineMinute) <= 4)
     .sort((a, b) => a.minute - b.minute);
 
-  const residuals = anchors
+  const routineAnchors = todayOfficial
+    .filter((item) => routineMinute === null || circularMinuteDistance(item.minute % 60, routineMinute) <= 4);
+
+  // This line is independent of forecast overlap. It must always show the real
+  // precise hourly trajectory even if today's NWS baseline was captured late.
+  const observedPoints: ObservedPoint[] = routineAnchors.map((item) => ({
+    minute: item.minute,
+    temp: item.row.temp as number,
+    time: item.row.time,
+  }));
+
+  const precisePoints: ObservedPoint[] = todayOfficial.map((item) => ({
+    minute: item.minute,
+    temp: item.row.temp as number,
+    time: item.row.time,
+  }));
+
+  const residuals = routineAnchors
     .map((item) => {
-      const base = interpolateBaseline(baselinePoints, item.minute);
+      const base = baselineAt(baselinePoints, item.minute);
       if (base === null || item.row.temp === null) return null;
-      return { minute: item.minute, temp: item.row.temp, residual: item.row.temp - base };
+      return { minute: item.minute, temp: item.row.temp, residual: item.row.temp - base, time: item.row.time };
     })
     .filter((point): point is ResidualPoint => point !== null);
+
+  const originalPeak = baselinePoints.reduce((best, point) => (point.temp > best.temp ? point : best), baselinePoints[0]);
+  const actualPeak = precisePoints.length
+    ? precisePoints.reduce((best, point) => (point.temp > best.temp ? point : best), precisePoints[0])
+    : null;
+
+  const sixHourRows = station.sixHour.filter((row) => row.high6 !== null && localDateLabel(row.time, station.timezone) === baseline.localDate);
+  const sixHourPeak = sixHourRows.length
+    ? sixHourRows.reduce((best, row) => ((row.high6 as number) > (best.high6 as number) ? row : best), sixHourRows[0])
+    : null;
 
   if (!residuals.length) {
     return {
       baselinePoints,
+      observedPoints,
       residuals: [] as ResidualPoint[],
       projected: [] as ProjectedPoint[],
       latestResidual: null as number | null,
       persistence: null as number | null,
       trend: null as number | null,
-      peak: null as LocalPoint | null,
+      peak: actualPeak ? { minute: actualPeak.minute, temp: actualPeak.temp } : null,
+      originalPeak,
+      actualPeak,
+      sixHourPeak,
       routineMinute,
     };
   }
@@ -255,7 +308,7 @@ function buildTrajectory(station: Station) {
   }
 
   const candidates: LocalPoint[] = [
-    ...residuals.map((point) => ({ minute: point.minute, temp: point.temp })),
+    ...observedPoints.map((point) => ({ minute: point.minute, temp: point.temp })),
     ...projected.map((point) => ({ minute: point.minute, temp: point.temp })),
   ];
   const peak = candidates.length
@@ -264,12 +317,16 @@ function buildTrajectory(station: Station) {
 
   return {
     baselinePoints,
+    observedPoints,
     residuals,
     projected,
     latestResidual: latest.residual,
     persistence,
     trend,
     peak,
+    originalPeak,
+    actualPeak,
+    sixHourPeak,
     routineMinute,
   };
 }
@@ -289,7 +346,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
   const daytimeBaseline = model.baselinePoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
   if (daytimeBaseline.length < 2) return null;
 
-  const plottedObserved = model.residuals.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
+  const plottedObserved = model.observedPoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
   const plottedProjected = model.projected.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
   const allTemps = [
     ...daytimeBaseline.map((point) => point.temp),
@@ -309,8 +366,9 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
   const y = (temperature: number) => pad.top + ((yMax - temperature) / Math.max(1, yMax - yMin)) * plotH;
   const line = (points: LocalPoint[]) => points.map((point) => `${x(point.minute)},${y(point.temp)}`).join(" ");
   const ticks = [6, 9, 12, 15, 18, 21];
-  const adaptive = plottedProjected.length && plottedObserved.length
-    ? [{ minute: plottedObserved[plottedObserved.length - 1].minute, temp: plottedObserved[plottedObserved.length - 1].temp }, ...plottedProjected]
+  const latestResidualPoint = model.residuals.length ? model.residuals[model.residuals.length - 1] : null;
+  const adaptive = plottedProjected.length && latestResidualPoint
+    ? [{ minute: latestResidualPoint.minute, temp: latestResidualPoint.temp }, ...plottedProjected]
     : plottedProjected;
   const middleTick = Math.round((yMin + yMax) / 2);
 
@@ -319,7 +377,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       <div className={styles.sectionTitle}>
         <div>
           <span>Daily trajectory</span>
-          <h3>Original forecast vs hourly-adjusted</h3>
+          <h3>Original forecast vs real hourly</h3>
         </div>
         <small>
           NWS baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}
@@ -327,20 +385,33 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <div className={styles.trajectoryStats}>
-        <div><span>Latest deviation</span><b>{model.latestResidual === null ? "—" : `${model.latestResidual >= 0 ? "+" : ""}${model.latestResidual.toFixed(1)}°F`}</b></div>
-        <div><span>Persistence</span><b>{model.persistence === null ? "—" : model.persistence.toFixed(2)}</b></div>
-        <div><span>Residual slope</span><b>{model.trend === null ? "—" : `${model.trend >= 0 ? "+" : ""}${model.trend.toFixed(1)}°/hr`}</b></div>
-        <div><span>Adaptive peak</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
+        <div>
+          <span>Original forecast max</span>
+          <b>{model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° · ${clockLabel(model.originalPeak.minute)}` : "—"}</b>
+        </div>
+        <div>
+          <span>Real precise max</span>
+          <b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(1)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b>
+        </div>
+        <div>
+          <span>6h max revealed</span>
+          <b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(1)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b>
+        </div>
+        <div>
+          <span>Adaptive max</span>
+          <b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b>
+        </div>
       </div>
 
       <div className={styles.trajectoryLegend}>
         <span><i className={styles.legendOriginal} />Original NWS</span>
-        <span><i className={styles.legendObserved} />Precise hourly</span>
+        <span><i className={styles.legendObserved} />Real precise hourly</span>
         <span><i className={styles.legendAdaptive} />Adaptive future</span>
+        {model.latestResidual !== null && <span>Deviation {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} original hourly forecast, precise hourly observations, and adaptive future trajectory`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} original hourly forecast, real precise hourly observations, and adaptive future trajectory`}>
           {[yMin, middleTick, yMax].map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -361,7 +432,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        No temperature path is hardcoded. The daily NWS hourly curve is stored as the baseline, then precise routine METARs measure a changing residual against it. Residual persistence and recent residual slope are re-estimated from that day, so the adjusted path can separate, re-couple, and separate again instead of staying as a fixed parallel offset.
+        The green line always uses the station's real precise routine METARs, independent of forecast overlap. The orange line compares those reports with the stored daily NWS curve; a late-captured baseline may use at most 90 minutes of edge extrapolation to anchor the first residual. The 6-hour maximum reports the maximum value for that six-hour block; its card shows the time the maximum was revealed, because the METAR 6-hour group does not encode the exact minute when that hidden maximum occurred.
       </p>
     </section>
   );
