@@ -19,6 +19,8 @@ type DsmStation = {
   stid: string;
   city: string;
   timezone: string;
+  todayDate: string;
+  productPil: string;
   releases: DsmRelease[];
   error: string | null;
 };
@@ -57,7 +59,7 @@ function rawLine(text: string) {
 
 function statusFor(station: DsmStation, latest: DsmRelease | null) {
   if (station.error) return { label: "DEGRADED", color: "#ffb4aa" };
-  if (!latest) return { label: "NO DSM", color: "#9fb1c1" };
+  if (!latest) return { label: "WAITING TODAY", color: "#9fb1c1" };
   if (latest.reportedHighF === null) return { label: "NO MAX", color: "#ffd39a" };
   return { label: "MAX FOUND", color: "#a9d2f2" };
 }
@@ -101,16 +103,16 @@ export function DsmReleaseStrip() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
           <div>
             <div style={{ fontSize: 9, letterSpacing: ".15em", textTransform: "uppercase", color: "#8fb6d7", fontWeight: 800 }}>DSM maximum check</div>
-            <div style={{ marginTop: 3, fontSize: 17, fontWeight: 800, letterSpacing: "-.02em" }}>Daily maximum + occurrence time found inside DSM</div>
+            <div style={{ marginTop: 3, fontSize: 17, fontWeight: 800, letterSpacing: "-.02em" }}>Latest DSM maximum for today</div>
           </div>
           <div style={{ fontSize: 9, color: error ? "#ffb4aa" : "#9fb1c1", textAlign: "right" }}>
-            {error ? error : "15s delivery polling · backup transmissions collapsed"}
+            {error ? error : "Automatic source polling · cycle retransmissions collapsed"}
           </div>
         </div>
 
         <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
           {data?.stations.map((station) => {
-            const latest = station.releases.find((release) => release.reportedHighF !== null) ?? station.releases[0] ?? null;
+            const latest = station.releases[0] ?? null;
             const status = statusFor(station, latest);
             return (
               <article key={station.stid} style={{ flex: "0 0 245px", background: "#14212c", border: "1px solid #304657", borderRadius: 14, padding: 12 }}>
@@ -125,14 +127,17 @@ export function DsmReleaseStrip() {
                 </div>
 
                 <div style={{ marginTop: 12, padding: "10px 11px", background: "#0a1219", borderRadius: 10, border: "1px solid #263c4d" }}>
-                  <div style={{ fontSize: 8, color: "#86a6bd", letterSpacing: ".13em", textTransform: "uppercase", fontWeight: 800 }}>Maximum reported in DSM</div>
+                  <div style={{ fontSize: 8, color: "#86a6bd", letterSpacing: ".13em", textTransform: "uppercase", fontWeight: 800 }}>Maximum in latest DSM</div>
                   <strong style={{ display: "block", marginTop: 3, fontSize: 29, lineHeight: 1 }}>{fmtTemp(latest?.reportedHighF ?? null)}</strong>
                   <div style={{ marginTop: 6, fontSize: 10, color: "#9fb1c1" }}>
-                    High occurred {latest?.highObservedClock ?? "—"}
+                    {latest
+                      ? `High occurred ${latest.highObservedClock ?? "—"}`
+                      : "No current-day DSM has arrived"}
                   </div>
                 </div>
 
                 <div style={{ marginTop: 9, display: "grid", gap: 4, fontSize: 10, color: "#bdc9d2" }}>
+                  <div><span style={{ color: "#7f98aa" }}>Cycle:</span> {latest ? (latest.cycle ? `${latest.cycle} LST` : "final") : "—"}</div>
                   <div><span style={{ color: "#7f98aa" }}>Issued:</span> {fmtTime(latest?.issuedAt ?? null, station.timezone)}</div>
                   {latest && latest.transmissionCount > 1 && (
                     <div><span style={{ color: "#7f98aa" }}>Delivery:</span> {latest.transmissionCount} transmissions collapsed</div>
