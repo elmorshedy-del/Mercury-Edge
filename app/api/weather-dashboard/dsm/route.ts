@@ -123,6 +123,13 @@ function normalizeProduct(detail: ProductDetail, timezone: string): DsmRelease {
   };
 }
 
+function compareDsmFreshness(a: DsmRelease, b: DsmRelease) {
+  const aDate = a.summaryDate ?? "0000-00-00";
+  const bDate = b.summaryDate ?? "0000-00-00";
+  if (aDate !== bDate) return bDate.localeCompare(aDate);
+  return new Date(b.issuedAt).getTime() - new Date(a.issuedAt).getTime();
+}
+
 async function fetchStationDsm(station: (typeof STATIONS)[number]) {
   if (!station.nwsLocation) return [] as DsmRelease[];
 
@@ -149,7 +156,8 @@ async function fetchStationDsm(station: (typeof STATIONS)[number]) {
   for (const release of fresh) known.set(release.productId, release);
   const releases = items
     .map((item) => known.get(item.id))
-    .filter((release): release is DsmRelease => Boolean(release));
+    .filter((release): release is DsmRelease => Boolean(release))
+    .sort(compareDsmFreshness);
 
   dsmMemory.set(station.station, { checkedAt: now, releases });
   return releases;
