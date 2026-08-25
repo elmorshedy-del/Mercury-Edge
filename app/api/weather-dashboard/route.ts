@@ -103,6 +103,32 @@ function cToF(value: number | null) {
   return value === null ? null : value * 9 / 5 + 32;
 }
 
+function floorCToF(value: number | null) {
+  const fahrenheit = cToF(value);
+  return fahrenheit === null ? null : Math.floor(fahrenheit);
+}
+
+function floorF(value: number | null) {
+  return value === null ? null : Math.floor(value);
+}
+
+function parseMetarTenthsC(raw: string | null) {
+  if (!raw) return null;
+  const match = raw.match(/(?:^|\s)T([01])(\d{3})[01]\d{3}(?=\s|$)/);
+  if (!match) return null;
+  const magnitude = Number(match[2]) / 10;
+  return match[1] === "1" ? -magnitude : magnitude;
+}
+
+function metarTemperatureFromF(raw: string | null, fallbackF: number | null) {
+  const preciseC = parseMetarTenthsC(raw);
+  return preciseC === null ? floorF(fallbackF) : floorCToF(preciseC);
+}
+
+function metarTemperatureFromC(raw: string | null, fallbackC: number | null) {
+  return floorCToF(parseMetarTenthsC(raw) ?? fallbackC);
+}
+
 function hPaToInHg(value: number | null) {
   return value === null ? null : value * 0.0295299830714;
 }
@@ -121,7 +147,7 @@ function parseSixHourFromRaw(raw: string | null, group: "1" | "2") {
   const match = raw.match(new RegExp(`(?:^|\\s)${group}([01])(\\d{3})(?=\\s|$)`));
   if (!match) return null;
   const c = Number(match[2]) / 10 * (match[1] === "1" ? -1 : 1);
-  return cToF(c);
+  return floorCToF(c);
 }
 
 function classify(raw: string | null): Row["kind"] {
@@ -150,20 +176,24 @@ function normalizeStation(station: AnyRecord) {
 
   const rows: Row[] = dates.map((date, index) => {
     const raw = str(valueAt(obs, keys.metar, index));
+    const kind = classify(raw);
+    const sourceTempF = num(valueAt(obs, keys.temp, index));
+    const sourceHigh6F = num(valueAt(obs, keys.high6, index));
+    const sourceLow6F = num(valueAt(obs, keys.low6, index));
     return {
       time: str(date) ?? "",
-      temp: num(valueAt(obs, keys.temp, index)),
+      temp: kind === "official" ? metarTemperatureFromF(raw, sourceTempF) : sourceTempF,
       rh: num(valueAt(obs, keys.rh, index)),
       windSpeed: num(valueAt(obs, keys.windSpeed, index)),
       windDirection: num(valueAt(obs, keys.windDirection, index)),
       altimeter: num(valueAt(obs, keys.altimeter, index)),
       seaLevelPressure: num(valueAt(obs, keys.seaLevelPressure, index)),
-      high6: num(valueAt(obs, keys.high6, index)),
-      low6: num(valueAt(obs, keys.low6, index)),
-      high24: num(valueAt(obs, keys.high24, index)),
-      low24: num(valueAt(obs, keys.low24, index)),
+      high6: parseSixHourFromRaw(raw, "1") ?? floorF(sourceHigh6F),
+      low6: parseSixHourFromRaw(raw, "2") ?? floorF(sourceLow6F),
+      high24: floorF(num(valueAt(obs, keys.high24, index))),
+      low24: floorF(num(valueAt(obs, keys.low24, index))),
       raw,
-      kind: classify(raw),
+      kind,
       source: "synoptic",
       receivedAt: null,
     };
@@ -202,14 +232,14 @@ function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
 
   const maxFromRaw = parseSixHourFromRaw(raw, "1");
   const minFromRaw = parseSixHourFromRaw(raw, "2");
-  const awcMax = cToF(num(item.maxT));
-  const awcMin = cToF(num(item.minT));
+  const awcMax = floorCToF(num(item.maxT));
+  const awcMin = floorCToF(num(item.minT));
 
   return {
     stid,
     row: {
       time,
-      temp: cToF(tempC),
+      temp: metarTemperatureFromC(raw, tempC),
       rh: rhFromC(tempC, dewC),
       windSpeed: num(item.wspd),
       windDirection: num(item.wdir),

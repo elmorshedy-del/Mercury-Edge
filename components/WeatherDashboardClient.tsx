@@ -50,8 +50,8 @@ type ObservedPoint = LocalPoint & { time: string };
 type ResidualPoint = LocalPoint & { residual: number; time: string };
 type ProjectedPoint = LocalPoint & { kind: "forecast" };
 
-function temp(value: number | null) {
-  return value === null ? "—" : `${value.toFixed(1)}°F`;
+function temp(value: number | null, digits = 1) {
+  return value === null ? "—" : `${value.toFixed(digits)}°F`;
 }
 
 function value(value: number | null, suffix = "") {
@@ -377,7 +377,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       <div className={styles.sectionTitle}>
         <div>
           <span>Daily trajectory</span>
-          <h3>Original forecast vs real hourly</h3>
+          <h3>Original forecast vs floored hourly METAR</h3>
         </div>
         <small>
           NWS baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}
@@ -390,12 +390,12 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
           <b>{model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° · ${clockLabel(model.originalPeak.minute)}` : "—"}</b>
         </div>
         <div>
-          <span>Real precise max</span>
-          <b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(1)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b>
+          <span>Floored METAR max</span>
+          <b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b>
         </div>
         <div>
           <span>6h max revealed</span>
-          <b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(1)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b>
+          <b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(0)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b>
         </div>
         <div>
           <span>Adaptive max</span>
@@ -405,13 +405,13 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
 
       <div className={styles.trajectoryLegend}>
         <span><i className={styles.legendOriginal} />Original NWS</span>
-        <span><i className={styles.legendObserved} />Real precise hourly</span>
+        <span><i className={styles.legendObserved} />Hourly METAR (floor °F)</span>
         <span><i className={styles.legendAdaptive} />Adaptive future</span>
         {model.latestResidual !== null && <span>Deviation {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} original hourly forecast, real precise hourly observations, and adaptive future trajectory`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} original hourly forecast, floored hourly METAR observations, and adaptive future trajectory`}>
           {[yMin, middleTick, yMax].map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -432,7 +432,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        The green line always uses the station's real precise routine METARs, independent of forecast overlap. The orange line compares those reports with the stored daily NWS curve; a late-captured baseline may use at most 90 minutes of edge extrapolation to anchor the first residual. The 6-hour maximum reports the maximum value for that six-hour block; its card shows the time the maximum was revealed, because the METAR 6-hour group does not encode the exact minute when that hidden maximum occurred.
+        The green line uses each routine METAR's raw tenths-Celsius T-group and floors the Fahrenheit conversion, independent of forecast overlap. The orange line compares those reports with the stored daily NWS curve; a late-captured baseline may use at most 90 minutes of edge extrapolation to anchor the first residual. The 6-hour maximum reports the maximum value for that six-hour block; its card shows the time the maximum was revealed, because the METAR 6-hour group does not encode the exact minute when that hidden maximum occurred.
       </p>
     </section>
   );
@@ -460,13 +460,13 @@ function StationCard({ station }: { station: Station }) {
       <section className={styles.heroReadout}>
         <div>
           <span>Latest</span>
-          <strong>{temp(station.latest?.temp ?? null)}</strong>
+          <strong>{temp(station.latest?.temp ?? null, station.latest?.kind === "official" ? 0 : 1)}</strong>
           <small>{station.latest ? timeLabel(station.latest.time, station.timezone) : "No report"}</small>
         </div>
         <div className={styles.miniStats}>
-          <div><span>6h high</span><b>{temp(latest6?.high6 ?? null)}</b></div>
-          <div><span>6h low</span><b>{temp(latest6?.low6 ?? null)}</b></div>
-          <div><span>24h high</span><b>{temp(latest24?.high24 ?? null)}</b></div>
+          <div><span>6h high</span><b>{temp(latest6?.high6 ?? null, 0)}</b></div>
+          <div><span>6h low</span><b>{temp(latest6?.low6 ?? null, 0)}</b></div>
+          <div><span>24h high</span><b>{temp(latest24?.high24 ?? null, 0)}</b></div>
           <div><span>RH</span><b>{value(station.latest?.rh ?? null, "%")}</b></div>
         </div>
       </section>
@@ -516,14 +516,14 @@ function StationCard({ station }: { station: Station }) {
             <span>Official stream</span>
             <h3>Hourly / SPECI reports</h3>
           </div>
-          <small>Precise METAR temperature when reported</small>
+          <small>Raw tenth °C T-group → floor °F</small>
         </div>
         <div className={styles.reportList}>
           {station.official.length ? station.official.map((row) => (
             <details className={styles.report} key={`${row.time}-${row.raw ?? "official"}`}>
               <summary>
                 <time>{timeLabel(row.time, station.timezone)}</time>
-                <b>{temp(row.temp)}</b>
+                <b>{temp(row.temp, 0)}</b>
                 <span>{windLabel(row)}</span>
               </summary>
               <code>{row.raw ?? "No raw METAR text"}</code>
@@ -548,9 +548,9 @@ function StationCard({ station }: { station: Station }) {
                 {station.sixHour.map((row) => (
                   <tr key={`${row.time}-six`}>
                     <td>{timeLabel(row.time, station.timezone)}</td>
-                    <td className={styles.highCell}>{temp(row.high6)}</td>
-                    <td>{temp(row.low6)}</td>
-                    <td>{temp(row.temp)}</td>
+                    <td className={styles.highCell}>{temp(row.high6, 0)}</td>
+                    <td>{temp(row.low6, 0)}</td>
+                    <td>{temp(row.temp, 0)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -641,7 +641,7 @@ export function WeatherDashboardClient() {
       </div>
 
       <div className={styles.notice}>
-        HF-ASOS temperatures are transmitted in whole °C. The displayed Fahrenheit number is a conversion of that coarse value; use the precise hourly/6-hour fields and trajectory residuals for whole-°F inference.
+        HF-ASOS temperatures are transmitted in whole °C and remain a coarse decimal conversion. Official METAR and 6-hour values use the raw tenths-°C group first, then floor the Fahrenheit result; the hourly chart uses those same floored values.
       </div>
 
       <main className={styles.cards}>

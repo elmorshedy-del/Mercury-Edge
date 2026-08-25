@@ -5,7 +5,9 @@ import { fetchJson } from "@/lib/http";
 export const dynamic = "force-dynamic";
 
 const DASHBOARD_STATIONS = new Set(["KNYC", "KPHL", "KLAX", "KDEN", "KSEA"]);
-const HISTORY_LIMIT = 8;
+// A DSM is daily, but the primary message may be followed by scheduled backup
+// transmissions. Keep enough products to collapse those copies into daily rows.
+const HISTORY_LIMIT = 12;
 const INDEX_REFRESH_MS = 15_000;
 
 const STANDARD_OFFSETS: Record<string, number> = {
@@ -45,6 +47,7 @@ type DsmRelease = {
   highObservedClock: string | null;
   rawText: string;
   sourceUrl: string;
+  transmissionCount: number;
 };
 
 type StationDsmCache = {
@@ -120,6 +123,7 @@ function normalizeProduct(detail: ProductDetail, timezone: string): DsmRelease {
     highObservedClock: parsed.highClock,
     rawText: detail.productText,
     sourceUrl: `${NWS_BASE_URL}/products/${detail.id}`,
+    transmissionCount: 1,
   };
 }
 
@@ -130,16 +134,34 @@ function compareDsmFreshness(a: DsmRelease, b: DsmRelease) {
   return new Date(b.issuedAt).getTime() - new Date(a.issuedAt).getTime();
 }
 
+function collapseDsmRetransmissions(products: DsmRelease[]) {
+  const collapsed = new Map<string, DsmRelease>();
+  for (const product of [...products].sort(compareDsmFreshness)) {
+    const key = product.summaryDate ?? product.productId;
+    const existing = collapsed.get(key);
+    if (!existing) {
+      collapsed.set(key, { ...product, transmissionCount: 1 });
+    } else {
+      existing.transmissionCount += 1;
+    }
+  }
+  return [...collapsed.values()].sort(compareDsmFreshness);
+}
+
 async function fetchStationDsm(station: (typeof STATIONS)[number]) {
   if (!station.nwsLocation) return [] as DsmRelease[];
 
   const now = Date.now();
   const cached = dsmMemory.get(station.station);
-  if (cached && now - cached.checkedAt < INDEX_REFRESH_MS) return cached.releases;
+  if (cached && now - cached.checkedAt < INDEX_REFRESH_MS) {
+    return collapseDsmRetransmissions(cached.releases);
+  }
 
   const indexUrl = `${NWS_BASE_URL}/products/types/DSM/locations/${station.nwsLocation}`;
   const index = await fetchJson<ProductIndex>(indexUrl, { timeoutMs: 8_000, retries: 0 });
-  const items = index["@graph"].slice(0, HISTORY_LIMIT);
+  const items = [...index["@graph"]]
+    .sort((a, b) => new Date(b.issuanceTime).getTime() - new Date(a.issuanceTime).getTime())
+    .slice(0, HISTORY_LIMIT);
   const known = new Map((cached?.releases ?? []).map((release) => [release.productId, release]));
   const missing = items.filter((item) => !known.has(item.id));
 
@@ -160,7 +182,7 @@ async function fetchStationDsm(station: (typeof STATIONS)[number]) {
     .sort(compareDsmFreshness);
 
   dsmMemory.set(station.station, { checkedAt: now, releases });
-  return releases;
+  return collapseDsmRetransmissions(releases);
 }
 
 export async function GET() {
@@ -187,7 +209,7 @@ export async function GET() {
           city: station.city,
           timezone: station.timezone,
           nwsLocation: station.nwsLocation,
-          releases: dsmMemory.get(station.station)?.releases ?? [],
+          releases: collapseDsmRetransmissions(dsmMemory.get(station.station)?.releases ?? []),
           error: error instanceof Error ? error.message : "DSM fetch failed",
         };
       }
