@@ -1,6 +1,6 @@
 # Step 4J plan — deterministic replay as a first-class capability
 
-Status: **4J-A PASS run 561; 4J-B PASS run 575 (272 Python tests + Node + Docker + Postgres). Next: 4J-C exact market/execution replay.**
+Status: **4J-A PASS run 561; 4J-B PASS run 575 (272 Python tests + Node + Docker + Postgres); 4J-C and 4J-D IMPLEMENTED but NOT PASS because GitHub Actions currently fails at workflow startup before any job is created.**
 
 Branch: `paper-rigour-v2`
 
@@ -10,10 +10,13 @@ Parent plan: `docs/STEP4_CANONICAL_TODO.md`.
 
 Prerequisite: Step 4I PASS; final docs-only verification run 551 (`32762827396`) is fully green.
 
-Verification:
+Verification / status records:
 - `docs/STEP4J_A_VERIFICATION.md`
 - `docs/STEP4J_B_VERIFICATION.md`
 - `docs/STEP4J_B_DESIGN_NOTE.md`
+- `docs/STEP4J_C_VERIFICATION.md`
+- `docs/STEP4J_D_VERIFICATION.md`
+- `docs/GITHUB_ACTIONS_STARTUP_BLOCKER.md`
 
 ## Goal
 
@@ -56,6 +59,11 @@ Replay is a new derivation over immutable source data. It must never mutate the 
 
 5. **Same immutable inputs + same version bundle + same configuration => same canonical output hashes.**
 
+6. **Verification state is distinct from implementation state.**
+   - no Step 4J substep becomes PASS merely because code/tests exist;
+   - a clean full Python/Node/Docker/Postgres gate on the corrected head is mandatory;
+   - while GitHub Actions is in the documented pre-job `startup_failure` state, C/D remain implemented-but-unverified.
+
 ---
 
 # 4J-A — Causal replay manifest and event stream — PASS
@@ -82,34 +90,52 @@ Acceptance verified on GitHub Actions **run 575 (`32765146488`)**: **272 Python 
 
 ---
 
-# 4J-C — Exact market/execution replay and A/B version selection — NEXT
+# 4J-C — Exact market/execution replay and A/B version selection — IMPLEMENTED, FULL GATE PENDING
 
-At each reconstructed elimination, recreate the configured benchmark decision using exact causal L2 only.
+Implemented:
+- `paper_collector/replay_execution.py`
+- `paper_collector/test_replay_execution.py`
+- `paper_collector/test_replay_execution_portfolio.py`
 
-Requirements:
+At each reconstructed elimination, the replay recreates the configured benchmark decision using exact causal L2 only.
+
+Requirements implemented in code:
 
 - reconstruct L2 from `market_data_journal` snapshot/deltas at the configured simulated arrival time;
-- preserve connection/sequence integrity and fail closed across fatal/gap-invalid book states;
+- preserve connection/hash-chain/sequence integrity and fail closed across fatal/gap-invalid book states;
 - use exact fee model, capital state, allocation order and execution latency configured for the replay;
 - no candle/midpoint/proxy fallback;
 - produce deterministic replay decision/order/fill/portfolio hashes;
-- support an A/B replay where one selected component version changes while source journals remain byte-identical;
-- explicitly report `UNSUPPORTED_VERSION` rather than silently substituting current logic for an unavailable historical version.
+- support A/B execution changes such as latency/config changes while source-input identity stays unchanged;
+- explicitly report `UNSUPPORTED_VERSION` rather than silently substituting current logic for an unavailable historical version;
+- keep benchmark and research/counterfactual result types separate.
 
-### 4J-C acceptance
+A full 4J-C attempt reached the expanded test suite and found a real classification bug in corrupt target L2. The bug was corrected. Static review then found a portfolio sizing issue where multiple routes could otherwise share a pre-fill cash assumption; execution now rechecks remaining cash before each order and has a negative-cash invariant plus a dedicated overspend regression.
 
-- same inputs/version/config replay twice => identical decisions, fills, ending cash/positions and hashes;
-- no L2 at arrival => no benchmark fill;
-- later L2 cannot fill an earlier simulated order;
-- changing execution latency can change execution output while source-input hash stays unchanged;
-- changing parser/elimination/execution version changes manifest/version identity and either runs the registered implementation or fails explicitly unsupported;
-- benchmark and research/counterfactual P&L remain separate.
+### 4J-C acceptance status
+
+- same inputs/version/config replay twice => identical decisions/fills/cash/positions/hashes: **implemented/test present**
+- no L2 at arrival => no benchmark fill: **implemented/test present**
+- later L2 cannot fill an earlier simulated order: **implemented/test present**
+- changing execution latency can change output while source-input hash stays unchanged: **implemented/test present**
+- changing parser/elimination/execution version changes manifest/version identity and either runs registered logic or fails explicitly unsupported: **implemented/tested at registered/unsupported boundaries**
+- benchmark and research/counterfactual P&L remain separate: **implemented/test present**
+- complete corrected-head CI: **BLOCKED — not yet verified**
+
+See `docs/STEP4J_C_VERIFICATION.md`.
 
 ---
 
-# 4J-D — Settlement grading, anti-leak real-Postgres regression, and persisted replay result
+# 4J-D — Settlement grading, anti-leak real-Postgres regression, and persisted replay result — IMPLEMENTED, FULL GATE PENDING
 
-Build a real-Postgres end-to-end fixture that includes:
+Implemented:
+- `paper_collector/replay_settlement.py`
+- `paper_collector/test_replay_settlement.py`
+- `paper_collector/test_replay_e2e_postgres.py`
+- `sql/022_deterministic_replay_results.sql`
+- `sql/tests/022_deterministic_replay_results_test.sql`
+
+The real-Postgres fixture includes:
 
 1. exact ASOS raw capture(s);
 2. an older physical observation received later;
@@ -118,28 +144,38 @@ Build a real-Postgres end-to-end fixture that includes:
 5. causal L2 snapshot/deltas;
 6. benchmark elimination/order decision;
 7. later exchange settlement;
-8. validation/settlement audit.
+8. immutable replay-result persistence and explanation.
 
-Run replay twice and compare complete canonical output hashes.
+Required anti-leak assertions are implemented in the fixture:
 
-Required anti-leak assertions:
-
-- the late weather record cannot affect earlier state;
-- the future MADIS/archive record cannot affect the earlier benchmark state/order;
-- the future rule snapshot cannot be selected early;
+- late weather cannot affect earlier state;
+- future MADIS/archive data cannot affect the earlier benchmark state/order;
+- future rule snapshot cannot be selected early;
 - later settlement cannot influence the trade decision;
 - missing historical L2 remains missing rather than becoming a candle proxy;
-- replay output can trace every decision to immutable source ids/hashes through the Step 4I explanation layer.
+- replay output traces each decision through canonical state/evidence/raw source, elimination, rule snapshot, exact L2 source and later settlement.
 
-Persist replay summaries/results separately from the source session; never overwrite live source facts or live benchmark P&L.
+Settlement grading computes realized hold-to-settlement P&L from authoritative per-market outcomes. A dead bucket later settling YES is an explicit invariant failure. Corrected settlement truth creates an append-only replay-result revision rather than rewriting source facts or the earlier result.
 
-### 4J-D acceptance
+### 4J-D acceptance status
 
-- real Postgres end-to-end replay passes twice with identical canonical hashes;
-- historical MADIS/archive future-information leakage regression is permanently green;
-- replay settlement result matches the independently persisted authoritative settlement;
-- replay can explain its order/evidence/raw chain;
-- source session row counts/hashes are unchanged by replay.
+- real-Postgres E2E exists and runs replay twice with canonical-hash equality assertions: **implemented**
+- historical MADIS/archive future-information leakage regression: **implemented, not yet full-gate verified**
+- settlement grade matches independently persisted authoritative exchange settlement: **implemented**
+- order/evidence/raw/rule/L2/settlement explanation: **implemented**
+- source session immutability checks: **implemented**
+- SQL022 append-only replay-result regression: **implemented**
+- complete corrected-head CI: **BLOCKED — not yet verified**
+
+See `docs/STEP4J_D_VERIFICATION.md`.
+
+---
+
+# GitHub Actions external verification blocker
+
+After the 4J-C corrections, GitHub began returning a synthetic `BuildFailed` workflow with `startup_failure` before any job is created. The repository-side isolation work reproduced it with the exact prior green workflow, a trivial smoke workflow, a fresh workflow filename, and a separate branch. The intended full `Paper Trader CI` workflow is restored on `paper-rigour-v2`.
+
+This is treated as an explicit external dependency, **not** as permission to waive CI. Full diagnosis and recovery steps are recorded in `docs/GITHUB_ACTIONS_STARTUP_BLOCKER.md`.
 
 ---
 
@@ -147,12 +183,14 @@ Persist replay summaries/results separately from the source session; never overw
 
 4J is complete only when A-D, full Python/Node/Docker/Postgres CI and the anti-leak real-Postgres regression pass.
 
-Then:
+When GitHub Actions normal job startup is restored:
 
-1. update `docs/STEP4_CANONICAL_TODO.md` checkboxes for verified 4H/4I/4J and the permanent archive anti-leak regression;
-2. consolidate Steps 4E-4J into `docs/HARD_STATE_REFACTOR.md` with exact runs/commits/test counts;
-3. run the whole final branch CI again;
-4. perform final hardening/diff review;
-5. **stop before merge/deploy and request the user's explicit approval.**
+1. run the current corrected branch through the complete gate;
+2. record the exact run id/test count in C/D verification docs;
+3. update `docs/STEP4_CANONICAL_TODO.md` checkboxes for verified 4H/4I/4J and the permanent archive anti-leak regression;
+4. consolidate Steps 4E-4J into `docs/HARD_STATE_REFACTOR.md` with exact runs/commits/test counts;
+5. run the whole final branch CI again;
+6. perform final hardening/diff review;
+7. **stop before merge/deploy and request the user's explicit approval.**
 
 The latency-engineering performance work remains deferred until this correctness/replay gate is complete.
