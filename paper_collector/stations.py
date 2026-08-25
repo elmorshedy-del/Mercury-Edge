@@ -14,24 +14,48 @@ compatibility must validate every candidate before money.
 """
 
 STATIONS: dict[str, dict[str, str]] = {
-    "KNYC": {"city": "New York", "series": "KXHIGHNY", "network": "NY_ASOS", "tier": "manual_case", "region": "northeast"},
-    "KPHL": {"city": "Philadelphia", "series": "KXHIGHPHIL", "network": "PA_ASOS", "tier": "manual_case", "region": "northeast"},
-    "KLAX": {"city": "Los Angeles", "series": "KXHIGHLAX", "network": "CA_ASOS", "tier": "manual_case", "region": "west_coast"},
-    "KPHX": {"city": "Phoenix", "series": "KXHIGHTPHX", "network": "AZ_ASOS", "tier": "heavy_tail", "region": "southwest"},
-    "KMDW": {"city": "Chicago", "series": "KXHIGHCHI", "network": "IL_ASOS", "tier": "historical_stale_price", "region": "midwest"},
-    "KMSP": {"city": "Minneapolis", "series": "KXHIGHTMIN", "network": "MN_ASOS", "tier": "historical_stale_price", "region": "midwest"},
-    "KDCA": {"city": "Washington", "series": "KXHIGHTDC", "network": "VA_ASOS", "tier": "heavy_tail", "region": "mid_atlantic"},
-    "KATL": {"city": "Atlanta", "series": "KXHIGHTATL", "network": "GA_ASOS", "tier": "heavy_tail", "region": "southeast"},
-    "KMSY": {"city": "New Orleans", "series": "KXHIGHTNOLA", "network": "LA_ASOS", "tier": "heavy_tail", "region": "gulf"},
-    "KBOS": {"city": "Boston", "series": "KXHIGHTBOS", "network": "MA_ASOS", "tier": "heavy_tail", "region": "northeast"},
-    "KMIA": {"city": "Miami", "series": "KXHIGHMIA", "network": "FL_ASOS", "tier": "control_high_frequency", "region": "southeast"},
-    "KOKC": {"city": "Oklahoma City", "series": "KXHIGHTOKC", "network": "OK_ASOS", "tier": "broad", "region": "plains"},
-    "KDFW": {"city": "Dallas", "series": "KXHIGHTDAL", "network": "TX_ASOS", "tier": "broad", "region": "texas"},
-    "KDEN": {"city": "Denver", "series": "KXHIGHDEN", "network": "CO_ASOS", "tier": "broad", "region": "mountain"},
-    "KAUS": {"city": "Austin", "series": "KXHIGHAUS", "network": "TX_ASOS", "tier": "broad", "region": "texas"},
-    "KHOU": {"city": "Houston", "series": "KXHIGHTHOU", "network": "TX_ASOS", "tier": "broad", "region": "texas"},
-    "KLAS": {"city": "Las Vegas", "series": "KXHIGHTLV", "network": "NV_ASOS", "tier": "broad", "region": "southwest"},
-    "KSAT": {"city": "San Antonio", "series": "KXHIGHTSATX", "network": "TX_ASOS", "tier": "broad", "region": "texas"},
+    "KNYC": {"city": "New York", "series": "KXHIGHNY", "network": "NY_ASOS", "tier": "manual_case", "region": "northeast", "timezone": "America/New_York"},
+    "KPHL": {"city": "Philadelphia", "series": "KXHIGHPHIL", "network": "PA_ASOS", "tier": "manual_case", "region": "northeast", "timezone": "America/New_York"},
+    "KLAX": {"city": "Los Angeles", "series": "KXHIGHLAX", "network": "CA_ASOS", "tier": "manual_case", "region": "west_coast", "timezone": "America/Los_Angeles"},
+    "KPHX": {"city": "Phoenix", "series": "KXHIGHTPHX", "network": "AZ_ASOS", "tier": "heavy_tail", "region": "southwest", "timezone": "America/Phoenix"},
+    "KMDW": {"city": "Chicago", "series": "KXHIGHCHI", "network": "IL_ASOS", "tier": "historical_stale_price", "region": "midwest", "timezone": "America/Chicago"},
+    "KMSP": {"city": "Minneapolis", "series": "KXHIGHTMIN", "network": "MN_ASOS", "tier": "historical_stale_price", "region": "midwest", "timezone": "America/Chicago"},
+    "KDCA": {"city": "Washington", "series": "KXHIGHTDC", "network": "VA_ASOS", "tier": "heavy_tail", "region": "mid_atlantic", "timezone": "America/New_York"},
+    "KATL": {"city": "Atlanta", "series": "KXHIGHTATL", "network": "GA_ASOS", "tier": "heavy_tail", "region": "southeast", "timezone": "America/New_York"},
+    "KMSY": {"city": "New Orleans", "series": "KXHIGHTNOLA", "network": "LA_ASOS", "tier": "heavy_tail", "region": "gulf", "timezone": "America/Chicago"},
+    "KBOS": {"city": "Boston", "series": "KXHIGHTBOS", "network": "MA_ASOS", "tier": "heavy_tail", "region": "northeast", "timezone": "America/New_York"},
+    "KMIA": {"city": "Miami", "series": "KXHIGHMIA", "network": "FL_ASOS", "tier": "control_high_frequency", "region": "southeast", "timezone": "America/New_York"},
+    "KOKC": {"city": "Oklahoma City", "series": "KXHIGHTOKC", "network": "OK_ASOS", "tier": "broad", "region": "plains", "timezone": "America/Chicago"},
+    "KDFW": {"city": "Dallas", "series": "KXHIGHTDAL", "network": "TX_ASOS", "tier": "broad", "region": "texas", "timezone": "America/Chicago"},
+    "KDEN": {"city": "Denver", "series": "KXHIGHDEN", "network": "CO_ASOS", "tier": "broad", "region": "mountain", "timezone": "America/Denver"},
+    "KAUS": {"city": "Austin", "series": "KXHIGHAUS", "network": "TX_ASOS", "tier": "broad", "region": "texas", "timezone": "America/Chicago"},
+    "KHOU": {"city": "Houston", "series": "KXHIGHTHOU", "network": "TX_ASOS", "tier": "broad", "region": "texas", "timezone": "America/Chicago"},
+    "KLAS": {"city": "Las Vegas", "series": "KXHIGHTLV", "network": "NV_ASOS", "tier": "broad", "region": "southwest", "timezone": "America/Los_Angeles"},
+    "KSAT": {"city": "San Antonio", "series": "KXHIGHTSATX", "network": "TX_ASOS", "tier": "broad", "region": "texas", "timezone": "America/Chicago"},
+}
+
+# api.weather.gov climate-product location identifiers. Kept explicit rather
+# than inferred from the ICAO station because the product API keys on NWS
+# product locations, not on Mercury's own station naming convention.
+NWS_VALIDATION_LOCATIONS: dict[str, str] = {
+    "KNYC": "NYC",
+    "KPHL": "PHL",
+    "KLAX": "LAX",
+    "KPHX": "PHX",
+    "KMDW": "MDW",
+    "KMSP": "MSP",
+    "KDCA": "DCA",
+    "KATL": "ATL",
+    "KMSY": "MSY",
+    "KBOS": "BOS",
+    "KMIA": "MIA",
+    "KOKC": "OKC",
+    "KDFW": "DFW",
+    "KDEN": "DEN",
+    "KAUS": "AUS",
+    "KHOU": "HOU",
+    "KLAS": "LAS",
+    "KSAT": "SAT",
 }
 
 # All 18 stations had historical market/weather coverage in the latest stored run.

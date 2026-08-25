@@ -137,6 +137,7 @@ def main() -> int:
         ("omo", "omo_collector.py", True),
         ("rules", "rule_collector.py", True),
         ("paper_trader", "unified_engine.py", False),
+        ("portfolio_monitor", "portfolio_monitor.py", False),
         ("auditor", "audit_daemon.py", False),
         ("status", "status_reporter.py", False),
     ]
@@ -153,6 +154,9 @@ def main() -> int:
         "weather_stations": list(WEATHER_STATIONS),
         "omo_priority_stations": list(OMO_DEFAULT_NETWORKS),
         "paper_strategies": ["DBN", "DSN", "SBK", "HSR", "WTY", "RMO", "PRV", "LVP", "HMF"],
+        "benchmark_gate": "approved_only",
+        "shadow_lab": True,
+        "drawdown_monitor": True,
         "children": [{"name": name, "critical": critical} for name, _, critical in child_specs],
     }))
 
