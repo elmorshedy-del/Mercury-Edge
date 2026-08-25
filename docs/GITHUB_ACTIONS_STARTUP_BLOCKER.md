@@ -1,6 +1,6 @@
-# GitHub Actions startup blocker — external verification dependency
+# GitHub Actions startup blocker — resolved transient platform incident
 
-Status: **ACTIVE EXTERNAL BLOCKER — repository implementation work may continue, but no affected substep may be marked PASS without a clean full gate**
+Status: **RESOLVED — normal repository jobs resumed and the complete hardening gate passed**
 
 Branch: `paper-rigour-v2`
 
@@ -8,41 +8,50 @@ PR: #5
 
 Observed beginning: 2026-08-24 after the Step 4J-C/D commits.
 
-## What changed
+Resolved by evidence: **Paper Trader CI run 595 (`32803316338`)** on hardening head `5061d43a43c964ea878165be78e6d0cf59134033`.
 
-The repository's real `Paper Trader CI` workflow operated normally through Step 4J-B. The last fully green replay run was:
+## What happened
 
-- workflow: `Paper Trader CI`
-- workflow id: `336950848`
-- run: **575** (`32765146488`)
-- tested head: `9f8bd9c11d32875c4f19d0de5fc7485a1aec016f`
-- result: success
-- Python: **272 tests, 0 failures**
-- compile/Docker/Node/Postgres: PASS
+The repository's real `Paper Trader CI` workflow operated normally through Step 4J-B. The last green replay run before the incident was run 575 (`32765146488`).
 
-A later 4J-C run did start and exposed a legitimate execution-regression failure; that failure was corrected in subsequent commits. Afterward GitHub stopped launching normal jobs.
+After later 4J-C changes, GitHub began surfacing a synthetic workflow object rather than starting repository jobs:
 
-The failing GitHub-side object is consistently surfaced as:
-
-- workflow/path: `BuildFailed`
+- path/name: `BuildFailed`
 - workflow id: `341498289`
 - conclusion: `startup_failure`
-- jobs: none / failure occurs before a repository job starts
+- jobs: none; failure occurred before any repository job started
 
-## Isolation work already performed
+This was isolated from the Mercury code and normal workflow definition as far as repository-side experiments could establish.
 
-This failure has been separated from the current workflow YAML as far as repository-side tests can establish:
+## Isolation work performed
 
 1. Restored the exact last-known-green workflow definition. Startup failure persisted.
 2. Replaced it temporarily with a minimal one-job smoke workflow. Startup failure persisted before the job began.
-3. Deleted/recreated the workflow under a fresh filename/name. The same synthetic `BuildFailed` startup failure persisted.
-4. Created a separate diagnostic branch outside PR #5 with a trivial workflow. The same startup failure persisted.
-5. Confirmed the connected GitHub identity has repository admin permission.
-6. Restored the hardening branch to the intended full `Paper Trader CI` gate and removed temporary diagnostic workflow files/probes.
+3. Deleted/recreated the workflow under a fresh filename/name. The same synthetic startup failure persisted.
+4. Reproduced the failure on a separate diagnostic branch outside PR #5.
+5. Confirmed the connected GitHub identity had repository admin permission.
+6. Restored the intended full `Paper Trader CI` workflow and removed temporary diagnostic probes.
 
-Therefore this document does **not** attribute the failure to Step 4J application/test code or to any particular YAML line. The evidence currently supports a GitHub Actions workflow-registration/account/platform startup problem because execution stops before any job exists.
+Because a trivial workflow on an unrelated branch failed before job creation, the incident was treated as external verification infrastructure rather than evidence against Step 4J application logic.
 
-## Diagnostic commits
+## Resolution evidence
+
+GitHub subsequently resumed normal Actions execution without a Mercury code workaround.
+
+Paper Trader CI **run 595 (`32803316338`)** completed successfully on `5061d43a43c964ea878165be78e6d0cf59134033`:
+
+- Python: **289 tests, 0 failures**
+- Python compile: PASS
+- collector Docker build: PASS
+- Node checks: PASS
+- fresh Postgres migrations: PASS
+- immutable SQL regressions 013/016/017/018/019/020/021/022: PASS
+- real-Postgres explainability regression: PASS
+- deterministic replay 4J-D real-Postgres anti-leak regression: PASS
+
+Therefore the startup incident is closed as a transient GitHub Actions/platform-registration failure. It does not waive any future CI requirement.
+
+## Diagnostic history retained for future operators
 
 Temporary isolation commits included:
 
@@ -55,29 +64,8 @@ Temporary isolation commits included:
 - `32305fb4a9c93a3690f3b25cead9331d92911657` — restore intended full hardening gate
 - `bd7efc31e9963ebc366b70be73aab2f683025fff` — remove separate-branch reindex probe from hardening history
 
-The diagnostic branch itself also reproduced `BuildFailed/startup_failure`, which is important because it rules out PR #5 as the sole trigger.
+## Permanent engineering rule
 
-## Canonical engineering consequence
+A future pre-job `BuildFailed/startup_failure` is not a test failure and is not a reason to bypass CI. Isolate it separately, retain the intended workflow, and require the next normal full gate to pass before marking a code substep verified.
 
-Until normal Actions startup is restored:
-
-- continue only work that can be statically reviewed/documented under this explicit external-dependency exception;
-- do not claim a new full-gate PASS;
-- do not check 4J-C, 4J-D, Step 4J or the permanent historical-MADIS anti-leak regression as verified;
-- do not merge PR #5;
-- do not deploy Railway;
-- do not enable real-money execution.
-
-The branch must still pass the complete current `.github/workflows/paper-ci.yml` after the external blocker is cleared.
-
-## Manual GitHub-side recovery if repository work is otherwise complete
-
-Because the connected tool surface does not expose the repository Actions enable/disable control, the likely safe reset path must be done in GitHub's UI by an administrator:
-
-1. Repository **Settings** → **Actions** → **General**.
-2. Temporarily disable Actions for the repository and save.
-3. Re-enable the intended Actions policy and save.
-4. Push/re-run the current hardening head.
-5. If the synthetic `BuildFailed` registration still appears before any job starts, escalate to GitHub Support with the workflow/run ids in this document.
-
-This is a verification-infrastructure reset only. It must not be used to bypass the required Step 4 full gate.
+No merge, deployment or real-money execution is authorized by this document.
