@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { WeatherDashboardClient } from "@/components/WeatherDashboardClient";
+import { SixHourReleaseStrip } from "@/components/SixHourReleaseStrip";
 
 export const metadata: Metadata = {
   title: "Weather Reports | Mercury Edge",
@@ -9,5 +10,10 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default function WeatherDashboardPage() {
-  return <WeatherDashboardClient />;
+  return (
+    <>
+      <SixHourReleaseStrip />
+      <WeatherDashboardClient />
+    </>
+  );
 }
