@@ -11,6 +11,7 @@ from replay_domain import (
     ReplayFilter,
     ReplayPolicy,
     ReplayVersionBundle,
+    _market_events,
     benchmark_events,
     build_manifest,
     sort_replay_events,
@@ -50,6 +51,22 @@ def ev(
         benchmark_admissible=benchmark_admissible,
         metadata=metadata or {},
     )
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _Connection:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, _sql, _params):
+        return _Rows(self._rows)
 
 
 class ReplayEventOrderingTests(unittest.TestCase):
@@ -120,6 +137,29 @@ class ArchiveCausalityTests(unittest.TestCase):
         self.assertEqual([x.source_id for x in benchmark_events([archive, live])], ["live"])
         self.assertTrue(live.live_causal)
         self.assertFalse(archive.live_causal)
+
+
+class MarketManifestDependencyTests(unittest.TestCase):
+    def test_non_target_market_rows_remain_bound_for_connection_integrity(self) -> None:
+        target_event = "KXHIGHNY-26AUG21"
+        rows = [
+            (1, "orderbook_snapshot", target_event + "-B8687", ts(15), 1_000, "a" * 64, "conn", 1, 1),
+            (2, "trade", "KXHIGHLAX-26AUG21-B7576", ts(15, 0, 1), 2_000, "b" * 64, "conn", 2, 1),
+        ]
+        filt = ReplayFilter(
+            station_code="KNYC",
+            event_ticker=target_event,
+            climate_date=date(2026, 8, 21),
+        )
+        events = _market_events(_Connection(rows), "session-a", filt)
+        self.assertEqual(
+            {item.source_id for item in events},
+            {"market_data_journal:1", "market_data_journal:2"},
+        )
+        by_id = {item.source_id: item for item in events}
+        self.assertEqual(by_id["market_data_journal:1"].event_ticker, target_event)
+        self.assertIsNone(by_id["market_data_journal:2"].event_ticker)
+        self.assertNotEqual(source_input_hash(events), source_input_hash(events[:1]))
 
 
 class ManifestIdentityTests(unittest.TestCase):

@@ -302,8 +302,10 @@ def _market_events(conn: psycopg.Connection[Any], session_id: str, filt: ReplayF
     out: list[ReplayEvent] = []
     for row_id, channel, market, received_at, received_ns, digest, connection_id, sid, seq in rows:
         market_text = str(market) if market is not None else None
-        if filt.event_ticker and market_text and not market_text.startswith(filt.event_ticker):
-            continue
+        # Keep the complete session WebSocket chain in the replay manifest even
+        # when a row belongs to another event. L2 integrity validation consumes
+        # connection-global hash/sequence continuity, so every market row that
+        # can influence execution must be bound into source_input_sha256.
         seq_key = f"{connection_id or ''}:{sid if sid is not None else ''}:{seq if seq is not None else ''}:{int(row_id)}"
         out.append(ReplayEvent(
             kind=ReplayEventKind.MARKET_MESSAGE,
