@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import styles from "@/app/weather-dashboard/weather-dashboard.module.css";
+import reactionStyles from "@/components/MarketReactionPanel.module.css";
 import {
   pointAtOrBefore,
   pointNear,
@@ -153,7 +154,9 @@ function buildShocks(official: WeatherRow[], baseline: ForecastBaseline | null, 
     const largeChange = deltaResidual !== null && Math.abs(deltaResidual) >= 0.9;
     const largeLevel = priorResidual === null && Math.abs(residual) >= 1.5;
     if (largeChange || largeLevel || precipStart) {
-      const changeText = deltaResidual === null ? `${residual >= 0 ? "+" : ""}${residual.toFixed(1)}°F vs TWC` : `${deltaResidual >= 0 ? "+" : ""}${deltaResidual.toFixed(1)}°F shock`;
+      const changeText = deltaResidual === null
+        ? `${residual >= 0 ? "+" : ""}${residual.toFixed(1)}°F vs TWC`
+        : `${deltaResidual >= 0 ? "+" : ""}${deltaResidual.toFixed(1)}°F shock`;
       shocks.push({
         time: item.row.time,
         minute: item.minute,
@@ -236,9 +239,11 @@ export function MarketReactionPanel({
     });
   }, [market, shocks]);
 
-  if (error) return <div className={styles.reactionError}>Kalshi reaction chart: {error}</div>;
-  if (!market) return <div className={styles.reactionLoading}>Loading synchronized Kalshi reaction…</div>;
-  if (!market.eventTicker || !market.markets.length) return <div className={styles.reactionError}>No Kalshi weather event was found for {date}.</div>;
+  if (error) return <div className={reactionStyles.reactionError}>Kalshi reaction chart: {error}</div>;
+  if (!market) return <div className={reactionStyles.reactionLoading}>Loading synchronized Kalshi reaction…</div>;
+  if (!market.eventTicker || !market.markets.length) {
+    return <div className={reactionStyles.reactionError}>No Kalshi weather event was found for {date}.</div>;
+  }
 
   const xMin = 6 * 60;
   const xMax = 22 * 60;
@@ -259,12 +264,14 @@ export function MarketReactionPanel({
     .filter((row) => row.temp !== null && localDateLabel(row.time, timezone) === date)
     .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())[0] ?? null;
   const latestMinute = latestObs ? minuteOfDay(latestObs.time, timezone) : minuteOfDay(new Date().toISOString(), timezone);
-  const twcAtLatest = baseline ? baselineAt(baseline.points.map((point) => ({ minute: minuteOfDay(point.time, timezone), temp: point.temp })), latestMinute) : null;
+  const twcAtLatest = baseline
+    ? baselineAt(baseline.points.map((point) => ({ minute: minuteOfDay(point.time, timezone), temp: point.temp })), latestMinute)
+    : null;
   const hrrrNow = models ? modelPointForMinute(models.hrrr.points, date, latestMinute) : null;
   const nbmNow = models ? modelPointForMinute(models.nbm.points, date, latestMinute) : null;
 
   return (
-    <section className={styles.reactionBlock}>
+    <section className={reactionStyles.reactionBlock}>
       <div className={styles.sectionTitle}>
         <div>
           <span>Market reaction</span>
@@ -273,19 +280,19 @@ export function MarketReactionPanel({
         <small>{market.seriesTicker} · {market.eventTicker}</small>
       </div>
 
-      <div className={styles.reactionStats}>
+      <div className={reactionStyles.reactionStats}>
         <div><span>Market center</span><b>{latestCenter ? `${latestCenter.value.toFixed(2)}°F` : "—"}</b></div>
         <div><span>Leading bucket</span><b>{market.leader ? `${market.leader.label} · ${(market.leader.probability * 100).toFixed(0)}%` : "—"}</b></div>
         <div><span>HRRR vs TWC</span><b>{hrrrNow?.temp !== null && hrrrNow && twcAtLatest !== null ? `${(hrrrNow.temp - twcAtLatest).toFixed(1)}°F` : "—"}</b></div>
         <div><span>NBM vs TWC</span><b>{nbmNow?.temp !== null && nbmNow && twcAtLatest !== null ? `${(nbmNow.temp - twcAtLatest).toFixed(1)}°F` : "—"}</b></div>
       </div>
 
-      <div className={styles.reactionLegend}>
+      <div className={reactionStyles.reactionLegend}>
         {visibleMarkets.map((item, index) => (
           <span key={item.ticker}><i style={{ background: PALETTE[index % PALETTE.length] }} />{item.label}</span>
         ))}
-        <span><i className={styles.shockKey} />Observed shock</span>
-        <span><i className={styles.revisionKey} />TWC revision</span>
+        <span><i className={reactionStyles.shockKey} />Observed shock</span>
+        <span><i className={reactionStyles.revisionKey} />TWC revision</span>
       </div>
 
       <div className={styles.chartScroll}>
@@ -296,18 +303,31 @@ export function MarketReactionPanel({
               <text x={pad.left - 8} y={y(tick) + 4} textAnchor="end" className={styles.axisText}>{Math.round(tick * 100)}%</text>
             </g>
           ))}
-          {ticks.map((hour) => <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={styles.axisText}>{hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}</text>)}
+          {ticks.map((hour) => (
+            <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={styles.axisText}>
+              {hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}
+            </text>
+          ))}
 
           {shocks.filter((shock) => shock.minute >= xMin && shock.minute <= xMax).map((shock) => (
             <g key={`shock-${shock.time}`}>
-              <line x1={x(shock.minute)} x2={x(shock.minute)} y1={pad.top} y2={height - pad.bottom} className={styles.shockLine} />
-              <text x={x(shock.minute) + 3} y={pad.top + 10} className={styles.shockText}>{clockLabel(shock.minute)}</text>
+              <line x1={x(shock.minute)} x2={x(shock.minute)} y1={pad.top} y2={height - pad.bottom} className={reactionStyles.shockLine} />
+              <text x={x(shock.minute) + 3} y={pad.top + 10} className={reactionStyles.shockText}>{clockLabel(shock.minute)}</text>
             </g>
           ))}
           {market.twcRevisions.map((revision) => {
             const minute = minuteOfDay(revision.time, timezone);
             if (minute < xMin || minute > xMax || localDateLabel(revision.time, timezone) !== date) return null;
-            return <line key={`revision-${revision.time}`} x1={x(minute)} x2={x(minute)} y1={pad.top} y2={height - pad.bottom} className={styles.revisionLine} />;
+            return (
+              <line
+                key={`revision-${revision.time}`}
+                x1={x(minute)}
+                x2={x(minute)}
+                y1={pad.top}
+                y2={height - pad.bottom}
+                className={reactionStyles.revisionLine}
+              />
+            );
           })}
 
           {visibleMarkets.map((item, index) => {
@@ -317,25 +337,41 @@ export function MarketReactionPanel({
               .map((point) => `${x(point.minute)},${y(point.probability)}`)
               .join(" ");
             if (!points) return null;
-            return <polyline key={item.ticker} points={points} fill="none" stroke={PALETTE[index % PALETTE.length]} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />;
+            return (
+              <polyline
+                key={item.ticker}
+                points={points}
+                fill="none"
+                stroke={PALETTE[index % PALETTE.length]}
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            );
           })}
         </svg>
       </div>
 
       {(hrrrNow || nbmNow) && (
-        <div className={styles.modelContext}>
+        <div className={reactionStyles.modelContext}>
           <b>Explanatory models at ~{clockLabel(latestMinute)}</b>
-          <span>HRRR: {hrrrNow?.temp !== null && hrrrNow ? `${hrrrNow.temp.toFixed(1)}°F` : "—"} · cloud {hrrrNow?.cloudCover !== null && hrrrNow ? `${hrrrNow.cloudCover.toFixed(0)}%` : "—"} · solar {hrrrNow?.shortwaveRadiation !== null && hrrrNow ? `${hrrrNow.shortwaveRadiation.toFixed(0)} W/m²` : "—"}</span>
-          <span>NBM: {nbmNow?.temp !== null && nbmNow ? `${nbmNow.temp.toFixed(1)}°F` : "—"} · cloud {nbmNow?.cloudCover !== null && nbmNow ? `${nbmNow.cloudCover.toFixed(0)}%` : "—"}</span>
+          <span>
+            HRRR: {hrrrNow?.temp !== null && hrrrNow ? `${hrrrNow.temp.toFixed(1)}°F` : "—"} · cloud {hrrrNow?.cloudCover !== null && hrrrNow ? `${hrrrNow.cloudCover.toFixed(0)}%` : "—"} · solar {hrrrNow?.shortwaveRadiation !== null && hrrrNow ? `${hrrrNow.shortwaveRadiation.toFixed(0)} W/m²` : "—"}
+          </span>
+          <span>
+            NBM: {nbmNow?.temp !== null && nbmNow ? `${nbmNow.temp.toFixed(1)}°F` : "—"} · cloud {nbmNow?.cloudCover !== null && nbmNow ? `${nbmNow.cloudCover.toFixed(0)}%` : "—"}
+          </span>
           <small>HRRR/NBM explain possible TWC failure modes only. They never replace the stored TWC market anchor.</small>
         </div>
       )}
 
       {reactions.length > 0 && (
-        <div className={styles.reactionTable}>
-          <div className={styles.reactionTableHeader}><span>Shock</span><span>+5m center</span><span>+15m center</span><span>Largest bucket move</span></div>
+        <div className={reactionStyles.reactionTable}>
+          <div className={reactionStyles.reactionTableHeader}>
+            <span>Shock</span><span>+5m center</span><span>+15m center</span><span>Largest bucket move</span>
+          </div>
           {reactions.map((reaction) => (
-            <div className={styles.reactionTableRow} key={reaction.shock.time}>
+            <div className={reactionStyles.reactionTableRow} key={reaction.shock.time}>
               <span><b>{clockLabel(reaction.shock.minute)}</b><small>{reaction.shock.label}</small></span>
               <span>{reaction.move5 === null ? "—" : `${reaction.move5 >= 0 ? "+" : ""}${reaction.move5.toFixed(2)}°F`}</span>
               <span>{reaction.move15 === null ? "—" : `${reaction.move15 >= 0 ? "+" : ""}${reaction.move15.toFixed(2)}°F`}</span>
