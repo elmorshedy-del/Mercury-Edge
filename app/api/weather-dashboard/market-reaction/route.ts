@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasDatabase, query } from "@/lib/db";
 import { KALSHI_BASE_URL, STATIONS as CONFIG_STATIONS } from "@/lib/config";
 import { getMinuteCandles } from "@/lib/sources/kalshi";
-import { buildMarketCenter, quoteMid, type MarketSeries } from "@/lib/weather/market-reaction";
+import { buildMarketCenter, quoteMid, type MarketQuote, type MarketSeries } from "@/lib/weather/market-reaction";
 
 export const dynamic = "force-dynamic";
 
@@ -174,16 +174,16 @@ export async function GET(request: NextRequest) {
     const end = new Date(now.getTime() + 5 * 60 * 1000);
     const marketSeries: MarketSeries[] = await Promise.all(event.items.map(async (market) => {
       const band = bandFromMarket(market);
-      const quotes = await getMinuteCandles(station.kalshiSeries, market.ticker, start, end)
+      const quotes: MarketQuote[] = await getMinuteCandles(station.kalshiSeries, market.ticker, start, end)
         .then((points) => points
           .filter((point) => localDate(point.capturedAt, station.timezone) === targetDate)
-          .map((point) => ({
+          .map((point): MarketQuote => ({
             time: point.capturedAt,
             yesBid: point.yesBid,
             yesAsk: point.yesAsk,
             lastPrice: point.lastPrice ?? null,
           })))
-        .catch((error) => {
+        .catch((error): MarketQuote[] => {
           console.error(`Unable to load candles for ${market.ticker}`, error);
           return [];
         });
