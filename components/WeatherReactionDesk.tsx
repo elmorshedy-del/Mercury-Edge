@@ -97,44 +97,49 @@ function clock(minute: number) {
 
 function chartModel(station: Station) {
   const timezone = station.timezone;
-  const baseline = station.forecastBaseline;
-  if (!timezone || !baseline?.points.length) return null;
-  const anchor = baseline.points
+  if (!timezone) return null;
+  const targetDate = station.forecastBaseline?.localDate ?? localDate(new Date().toISOString(), timezone);
+  const anchor = (station.forecastBaseline?.points ?? [])
+    .filter((point) => localDate(point.time, timezone) === targetDate)
     .map((point) => ({ minute: minuteOfDay(point.time, timezone), temp: point.temp }))
     .sort((a, b) => a.minute - b.minute);
   const actual = station.official
-    .filter((row) => row.temp !== null && localDate(row.time, timezone) === baseline.localDate)
+    .filter((row) => row.temp !== null && localDate(row.time, timezone) === targetDate)
     .map((row) => ({ minute: minuteOfDay(row.time, timezone), temp: row.temp as number, time: row.time }))
     .sort((a, b) => a.minute - b.minute);
   const shocks: Shock[] = [];
-  let previousResidual: number | null = null;
-  for (const point of actual) {
-    const expected = interpolate(anchor, point.minute);
-    if (expected === null) continue;
-    const residual = point.temp - expected;
-    if (previousResidual !== null) {
-      const delta = residual - previousResidual;
-      if (Math.abs(delta) >= 0.9) shocks.push({ minute: point.minute, time: point.time ?? "", delta });
-    } else if (Math.abs(residual) >= 1.5) {
-      shocks.push({ minute: point.minute, time: point.time ?? "", delta: residual });
+  if (anchor.length) {
+    let previousResidual: number | null = null;
+    for (const point of actual) {
+      const expected = interpolate(anchor, point.minute);
+      if (expected === null) continue;
+      const residual = point.temp - expected;
+      if (previousResidual !== null) {
+        const delta = residual - previousResidual;
+        if (Math.abs(delta) >= 0.9) shocks.push({ minute: point.minute, time: point.time ?? "", delta });
+      } else if (Math.abs(residual) >= 1.5) {
+        shocks.push({ minute: point.minute, time: point.time ?? "", delta: residual });
+      }
+      previousResidual = residual;
     }
-    previousResidual = residual;
   }
-  return { anchor, actual, shocks };
+  return { targetDate, anchor, actual, shocks };
 }
 
 function AnchorChart({ station }: { station: Station }) {
   const model = useMemo(() => chartModel(station), [station]);
-  if (!station.timezone || !station.forecastBaseline) {
-    return <div className={deskStyles.empty}>TWC anchor is waiting for TWC_API_KEY. Kalshi and NOAA context can still load below.</div>;
+  if (!station.timezone) return <div className={deskStyles.empty}>Station timezone is unavailable.</div>;
+  if (!model || (!model.anchor.length && !model.actual.length)) {
+    return <div className={deskStyles.empty}>No observations are available for today yet.</div>;
   }
-  if (!model?.anchor.length) return <div className={deskStyles.empty}>No TWC anchor points are available yet.</div>;
 
   const xMin = 6 * 60;
   const xMax = 22 * 60;
   const visibleAnchor = model.anchor.filter((point) => point.minute >= xMin && point.minute <= xMax);
   const visibleActual = model.actual.filter((point) => point.minute >= xMin && point.minute <= xMax);
   const temperatures = [...visibleAnchor, ...visibleActual].map((point) => point.temp);
+  if (!temperatures.length) return <div className={deskStyles.empty}>No chartable readings are available between 6 AM and 10 PM for {model.targetDate}.</div>;
+
   const yMin = Math.floor(Math.min(...temperatures) - 2);
   const yMax = Math.ceil(Math.max(...temperatures) + 2);
   const width = 700;
@@ -147,20 +152,24 @@ function AnchorChart({ station }: { station: Station }) {
   const polyline = (points: Point[]) => points.map((point) => `${x(point.minute)},${y(point.temp)}`).join(" ");
   const ticks = [6, 9, 12, 15, 18, 21];
   const yTicks = [yMin, Math.round((yMin + yMax) / 2), yMax];
+  const hasAnchor = visibleAnchor.length > 0;
 
   return (
     <section className={deskStyles.anchor}>
       <div className={deskStyles.title}>
-        <div><span>Anchor + shocks</span><h3>Immutable pre-day TWC path vs actual</h3></div>
-        <small>TWC high {station.forecastBaseline.forecastHigh === null ? "—" : `${station.forecastBaseline.forecastHigh.toFixed(0)}°F`}</small>
+        <div>
+          <span>Anchor + shocks · {model.targetDate}</span>
+          <h3>{hasAnchor ? "Immutable pre-day TWC path vs actual" : "Observed temperature path · TWC anchor pending"}</h3>
+        </div>
+        <small>{hasAnchor ? `TWC high ${station.forecastBaseline?.forecastHigh === null || station.forecastBaseline?.forecastHigh === undefined ? "—" : `${station.forecastBaseline.forecastHigh.toFixed(0)}°F`}` : "TWC_API_KEY not configured"}</small>
       </div>
       <div className={deskStyles.legend}>
-        <span><i className={deskStyles.anchorKey} />Pre-day TWC anchor</span>
+        {hasAnchor && <span><i className={deskStyles.anchorKey} />Pre-day TWC anchor</span>}
         <span><i className={deskStyles.actualKey} />Observed METAR</span>
-        <span><i className={deskStyles.shockKey} />Residual shock ≥0.9°F</span>
+        {hasAnchor && <span><i className={deskStyles.shockKey} />Residual shock ≥0.9°F</span>}
       </div>
       <div className={deskStyles.chart}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} TWC anchor and observed temperature shocks`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} temperature path for ${model.targetDate}`}>
           {yTicks.map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={deskStyles.grid} />
@@ -168,7 +177,7 @@ function AnchorChart({ station }: { station: Station }) {
             </g>
           ))}
           {ticks.map((hour) => <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={deskStyles.axis}>{hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}</text>)}
-          <polyline points={polyline(visibleAnchor)} className={deskStyles.anchorLine} />
+          {hasAnchor && <polyline points={polyline(visibleAnchor)} className={deskStyles.anchorLine} />}
           {visibleActual.length > 1 && <polyline points={polyline(visibleActual)} className={deskStyles.actualLine} />}
           {visibleActual.map((point) => <circle key={point.time} cx={x(point.minute)} cy={y(point.temp)} r="4" className={deskStyles.actualDot} />)}
           {model.shocks.filter((shock) => shock.minute >= xMin && shock.minute <= xMax).map((shock) => (
@@ -179,7 +188,7 @@ function AnchorChart({ station }: { station: Station }) {
           ))}
         </svg>
       </div>
-      <p className={deskStyles.note}>This upper chart never replaces the anchor with a later forecast. Later TWC revisions are separate market-information events and are marked on the Kalshi panel below.</p>
+      <p className={deskStyles.note}>{hasAnchor ? "The TWC anchor remains immutable; later TWC revisions are separate market-information events on the Kalshi panel." : "Observed temperatures remain visible now. The immutable TWC anchor and residual-shock layer will appear automatically after TWC_API_KEY is configured."}</p>
     </section>
   );
 }
