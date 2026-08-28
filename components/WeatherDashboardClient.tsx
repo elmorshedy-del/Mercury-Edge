@@ -37,6 +37,7 @@ type ForecastBaseline = {
   localDate: string;
   issuedAt: string | null;
   capturedAt: string;
+  forecastHigh: number | null;
   points: ForecastPoint[];
 };
 
@@ -450,18 +451,18 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
           <span>Daily trajectory</span>
           <h3>TWC forecast vs floored hourly METAR</h3>
         </div>
-        <small>TWC baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
+        <small>TWC pre-day baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
       </div>
 
       <div className={styles.trajectoryStats}>
-        <div><span>Original TWC max</span><b>{model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° · ${clockLabel(model.originalPeak.minute)}` : "—"}</b></div>
+        <div><span>TWC calendar-day high</span><b>{station.forecastBaseline.forecastHigh !== null ? `${station.forecastBaseline.forecastHigh.toFixed(0)}°F` : model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° hourly peak` : "—"}</b></div>
         <div><span>Floored METAR max</span><b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b></div>
         <div><span>6h max revealed</span><b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(0)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b></div>
-        <div><span>Adaptive max</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
+        <div><span>Adaptive hourly max</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
       </div>
 
       <div className={styles.trajectoryLegend}>
-        <span><i className={styles.legendOriginal} />Original TWC</span>
+        <span><i className={styles.legendOriginal} />Original TWC hourly path</span>
         <span><i className={styles.legendObserved} />Hourly METAR (floor °F)</span>
         <span><i className={styles.legendAdaptive} />Kalman adaptive future</span>
         {model.latestResidual !== null && <span>Latest miss {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
@@ -486,7 +487,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} The adaptive line numerically applies only the sequential Kalman bias state with observed residual persistence. Cloud, dew-point, wind/advection and precipitation are diagnostic for now; their numerical coefficients remain zero until expanding-window historical validation shows out-of-sample value. This prevents a post-hoc weather story from becoming trading logic.
+        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} The blue path is TWC hourly shape; the high card uses TWC calendarDayTemperatureMax because the market is a midnight-to-midnight calendar-day maximum. TWC itself warns that its final daily high should not be derived from the hourly series. The adaptive line numerically applies only the sequential Kalman bias state with observed residual persistence. Cloud, dew-point, wind/advection and precipitation remain diagnostic until expanding-window historical validation shows out-of-sample value.
       </p>
     </section>
   );
