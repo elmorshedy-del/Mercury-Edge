@@ -21,6 +21,14 @@ type KalshiMarket = {
   last_price_dollars?: string;
 };
 
+type KalshiEventPayload = {
+  event?: {
+    event_ticker: string;
+    series_ticker?: string;
+    markets?: KalshiMarket[];
+  };
+};
+
 type SnapshotRow = {
   captured_at: Date;
   daily_highs: Record<string, number | null> | null;
@@ -33,6 +41,8 @@ const DASHBOARD_IDS: Record<string, string> = {
   KDEN: "KDEN",
   KSEA: "KSEA",
 };
+
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 
 function numberOrNull(value: unknown) {
   if (value === undefined || value === null || value === "") return null;
@@ -47,6 +57,15 @@ function localDate(iso: string | Date, timezone: string) {
     month: "2-digit",
     day: "2-digit",
   }).format(typeof iso === "string" ? new Date(iso) : iso);
+}
+
+function exactEventTicker(seriesTicker: string, date: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return null;
+  const monthIndex = Number(match[2]) - 1;
+  const month = MONTHS[monthIndex];
+  if (!month) return null;
+  return `${seriesTicker}-${match[1].slice(-2)}${month}${match[3]}`;
 }
 
 function bandFromMarket(market: KalshiMarket) {
@@ -78,36 +97,24 @@ function bandFromMarket(market: KalshiMarket) {
   return { ticker: market.ticker, label, lower, upper };
 }
 
-async function fetchMarkets(seriesTicker: string, status: "open" | "closed" | "settled") {
-  const params = new URLSearchParams({ series_ticker: seriesTicker, status, limit: "200" });
-  const response = await fetch(`${KALSHI_BASE_URL}/markets?${params}`, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Kalshi markets request failed (${response.status})`);
-  const payload = await response.json() as { markets?: KalshiMarket[] };
-  return Array.isArray(payload.markets) ? payload.markets : [];
-}
+async function fetchExactEvent(seriesTicker: string, date: string) {
+  const eventTicker = exactEventTicker(seriesTicker, date);
+  if (!eventTicker) throw new Error(`Invalid trading date ${date}`);
 
-function chooseEvent(markets: KalshiMarket[], date: string, timezone: string) {
-  const groups = new Map<string, KalshiMarket[]>();
-  for (const market of markets) {
-    const group = groups.get(market.event_ticker) ?? [];
-    group.push(market);
-    groups.set(market.event_ticker, group);
-  }
+  const response = await fetch(
+    `${KALSHI_BASE_URL}/events/${encodeURIComponent(eventTicker)}?with_nested_markets=true`,
+    { cache: "no-store" },
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Kalshi event request failed (${response.status})`);
 
-  for (const [eventTicker, items] of groups.entries()) {
-    const close = items.map((item) => item.close_time ?? item.expected_expiration_time ?? "").find(Boolean) ?? "";
-    if (close && localDate(close, timezone) === date) return { eventTicker, items, close };
+  const payload = await response.json() as KalshiEventPayload;
+  const event = payload.event;
+  if (!event || event.event_ticker !== eventTicker) {
+    throw new Error(`Kalshi returned the wrong event for ${date}`);
   }
-  return null;
-}
-
-async function discoverEvent(seriesTicker: string, date: string, timezone: string) {
-  for (const status of ["open", "closed", "settled"] as const) {
-    const markets = await fetchMarkets(seriesTicker, status);
-    const chosen = chooseEvent(markets, date, timezone);
-    if (chosen?.items.length) return { ...chosen, status };
-  }
-  return null;
+  const markets = Array.isArray(event.markets) ? event.markets : [];
+  return { eventTicker, markets };
 }
 
 async function twcRevisionMarkers(stid: string, date: string) {
@@ -149,28 +156,33 @@ export async function GET(request: NextRequest) {
   if (!station) return NextResponse.json({ error: `Unsupported station ${stid}` }, { status: 400 });
 
   const targetDate = request.nextUrl.searchParams.get("date") ?? localDate(new Date(), station.timezone);
+  const expectedEventTicker = exactEventTicker(station.kalshiSeries, targetDate);
+  if (!expectedEventTicker) {
+    return NextResponse.json({ error: `Invalid date ${targetDate}` }, { status: 400 });
+  }
 
   try {
-    const event = await discoverEvent(station.kalshiSeries, targetDate, station.timezone);
+    const event = await fetchExactEvent(station.kalshiSeries, targetDate);
     if (!event) {
       return NextResponse.json({
         stid,
         date: targetDate,
         timezone: station.timezone,
         seriesTicker: station.kalshiSeries,
+        expectedEventTicker,
         eventTicker: null,
         markets: [],
         marketCenter: [],
         leader: null,
         twcRevisions: await twcRevisionMarkers(stid, targetDate),
         updatedAt: new Date().toISOString(),
-      });
+      }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
     }
 
     const now = new Date();
     const start = new Date(now.getTime() - 36 * 60 * 60 * 1000);
     const end = new Date(now.getTime() + 5 * 60 * 1000);
-    const marketSeries: MarketSeries[] = await Promise.all(event.items.map(async (market) => {
+    const marketSeries: MarketSeries[] = await Promise.all(event.markets.map(async (market) => {
       const band = bandFromMarket(market);
       const quotes: MarketQuote[] = await getMinuteCandles(station.kalshiSeries, market.ticker, start, end)
         .then((points) => points
@@ -211,14 +223,14 @@ export async function GET(request: NextRequest) {
       date: targetDate,
       timezone: station.timezone,
       seriesTicker: station.kalshiSeries,
+      expectedEventTicker,
       eventTicker: event.eventTicker,
-      eventStatus: event.status,
       markets: latestMarkets,
       marketCenter,
       leader: leader ? { ticker: leader.ticker, label: leader.label, probability: leader.latestMid } : null,
       twcRevisions: await twcRevisionMarkers(stid, targetDate),
       updatedAt: new Date().toISOString(),
-    }, { headers: { "Cache-Control": "public, max-age=15, stale-while-revalidate=30" } });
+    }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
   } catch (error) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : "Unable to build market reaction chart",
