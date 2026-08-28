@@ -24,7 +24,7 @@ type ForecastPoint = {
 };
 
 type ForecastBaseline = {
-  source: "twc";
+  source: "twc" | "nws";
   localDate: string;
   issuedAt: string | null;
   capturedAt: string;
@@ -155,7 +155,7 @@ function buildShocks(official: WeatherRow[], baseline: ForecastBaseline | null, 
     const largeLevel = priorResidual === null && Math.abs(residual) >= 1.5;
     if (largeChange || largeLevel || precipStart) {
       const changeText = deltaResidual === null
-        ? `${residual >= 0 ? "+" : ""}${residual.toFixed(1)}°F vs TWC`
+        ? `${residual >= 0 ? "+" : ""}${residual.toFixed(1)}°F vs anchor`
         : `${deltaResidual >= 0 ? "+" : ""}${deltaResidual.toFixed(1)}°F shock`;
       shocks.push({
         time: item.row.time,
@@ -264,18 +264,19 @@ export function MarketReactionPanel({
     .filter((row) => row.temp !== null && localDateLabel(row.time, timezone) === date)
     .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())[0] ?? null;
   const latestMinute = latestObs ? minuteOfDay(latestObs.time, timezone) : minuteOfDay(new Date().toISOString(), timezone);
-  const twcAtLatest = baseline
+  const anchorAtLatest = baseline
     ? baselineAt(baseline.points.map((point) => ({ minute: minuteOfDay(point.time, timezone), temp: point.temp })), latestMinute)
     : null;
   const hrrrNow = models ? modelPointForMinute(models.hrrr.points, date, latestMinute) : null;
   const nbmNow = models ? modelPointForMinute(models.nbm.points, date, latestMinute) : null;
+  const sourceName = baseline?.source === "nws" ? "NWS" : "TWC";
 
   return (
     <section className={reactionStyles.reactionBlock}>
       <div className={styles.sectionTitle}>
         <div>
           <span>Market reaction</span>
-          <h3>Kalshi synchronized to TWC shocks</h3>
+          <h3>Kalshi synchronized to {sourceName} deviations</h3>
         </div>
         <small>{market.seriesTicker} · {market.eventTicker}</small>
       </div>
@@ -283,8 +284,8 @@ export function MarketReactionPanel({
       <div className={reactionStyles.reactionStats}>
         <div><span>Market center</span><b>{latestCenter ? `${latestCenter.value.toFixed(2)}°F` : "—"}</b></div>
         <div><span>Leading bucket</span><b>{market.leader ? `${market.leader.label} · ${(market.leader.probability * 100).toFixed(0)}%` : "—"}</b></div>
-        <div><span>HRRR vs TWC</span><b>{hrrrNow?.temp !== null && hrrrNow && twcAtLatest !== null ? `${(hrrrNow.temp - twcAtLatest).toFixed(1)}°F` : "—"}</b></div>
-        <div><span>NBM vs TWC</span><b>{nbmNow?.temp !== null && nbmNow && twcAtLatest !== null ? `${(nbmNow.temp - twcAtLatest).toFixed(1)}°F` : "—"}</b></div>
+        <div><span>HRRR vs anchor</span><b>{hrrrNow?.temp !== null && hrrrNow && anchorAtLatest !== null ? `${(hrrrNow.temp - anchorAtLatest).toFixed(1)}°F` : "—"}</b></div>
+        <div><span>NBM vs anchor</span><b>{nbmNow?.temp !== null && nbmNow && anchorAtLatest !== null ? `${(nbmNow.temp - anchorAtLatest).toFixed(1)}°F` : "—"}</b></div>
       </div>
 
       <div className={reactionStyles.reactionLegend}>
@@ -292,11 +293,11 @@ export function MarketReactionPanel({
           <span key={item.ticker}><i style={{ background: PALETTE[index % PALETTE.length] }} />{item.label}</span>
         ))}
         <span><i className={reactionStyles.shockKey} />Observed shock</span>
-        <span><i className={reactionStyles.revisionKey} />TWC revision</span>
+        {market.twcRevisions.length > 0 && <span><i className={reactionStyles.revisionKey} />Forecast revision</span>}
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${stid} Kalshi weather bucket prices synchronized to observed and TWC forecast shocks`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${stid} Kalshi weather bucket prices synchronized to observed forecast deviations`}>
           {yTicks.map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -361,7 +362,7 @@ export function MarketReactionPanel({
           <span>
             NBM: {nbmNow?.temp !== null && nbmNow ? `${nbmNow.temp.toFixed(1)}°F` : "—"} · cloud {nbmNow?.cloudCover !== null && nbmNow ? `${nbmNow.cloudCover.toFixed(0)}%` : "—"}
           </span>
-          <small>HRRR/NBM explain possible TWC failure modes only. They never replace the stored TWC market anchor.</small>
+          <small>HRRR/NBM remain explanatory context. They can help diagnose why the frozen {sourceName} path may fail, but they do not replace that stored anchor.</small>
         </div>
       )}
 
@@ -382,7 +383,7 @@ export function MarketReactionPanel({
       )}
 
       <p className={styles.trajectoryNote}>
-        Kalshi bucket lines use public one-minute bid/ask midpoints (last trade when a side is missing). “Market center” is a probability-weighted bucket center for visual reaction tracking, not an exact expectation because the edge buckets are open-ended. Vertical markers use the same local clock as the TWC trajectory above. TWC revisions are shown separately from observed weather shocks so their market effects can be tested independently.
+        Kalshi bucket lines use public one-minute bid/ask midpoints (last trade when a side is missing). “Market center” is a probability-weighted bucket center for visual reaction tracking, not an exact expectation because the edge buckets are open-ended. Vertical markers use the same local clock as the frozen forecast trajectory and observed-driver strips above.
       </p>
     </section>
   );
