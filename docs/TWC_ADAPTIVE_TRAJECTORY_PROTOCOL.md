@@ -4,30 +4,32 @@
 
 Mercury's trajectory should answer two separate questions:
 
-1. What did The Weather Company (TWC) forecast for the station, hour by hour?
+1. What did The Weather Company (TWC) forecast for the station, hour by hour, before the target calendar day began?
 2. Given what has actually happened so far, what is the best defensible distribution for the remaining temperature path and daily maximum?
 
 The second question must not be answered by mechanically shifting the original curve. A temperature miss can have different causes with different persistence: cloud/radiation, moisture, wind/advection, precipitation/convection, or a station/report anomaly.
 
 ## Baseline and archive
 
-- Primary forecast baseline: TWC Hourly Forecast (`/v3/wx/forecast/hourly/2day`) at the exact station coordinates.
-- Persist the first TWC curve captured for each local day as the displayed `original forecast`.
-- Persist a complete TWC forecast snapshot at 15-minute buckets throughout the day. This creates an exact revision archive and also preserves the previous day's forecast for the following day.
+- Primary trajectory shape: TWC Hourly Forecast (`/v3/wx/forecast/hourly/2day`) at the exact station coordinates.
+- Daily-high prior: TWC Daily Forecast (`/v3/wx/forecast/daily/3day`). For Kalshi-style midnight-to-midnight markets, use `calendarDayTemperatureMax`; do not derive the TWC daily high from the hourly series. TWC explicitly documents that Daily Forecast applies additional logic beyond the hourly temperatures.
+- Persist a complete TWC forecast snapshot at 15-minute buckets throughout the day, including the hourly path and daily-high values for every returned date.
+- For a target day, use the latest TWC snapshot captured **before local midnight** as the displayed original/pre-day baseline. If none exists because archiving has only just started, fall back to the earliest same-day snapshot and mark its capture time.
 - Verification observations: raw METAR/SPECI T-group temperature and dew point, wind vector, cloud amount parsed from METAR, precipitation/weather codes, six-hour maxima, and high-frequency station observations where available.
 - Do not treat NWS forecasts as a surrogate for TWC forecast history. NWS can remain an independent comparison/research feature, but it is not the trajectory baseline for a TWC-settled market.
 
-TWC documents the hourly forecast as coming from its own Forecast system and exposes temperature, dew point, cloud cover, wind, precipitation, and related fields. TWC also documents that Forecast On Demand blends observations, high-resolution analyses/models, radar, soundings and other inputs.
+TWC documents the hourly and daily products as coming from its own Forecast system and exposes temperature, dew point, cloud cover, wind, precipitation, and related fields. TWC also documents that Forecast On Demand blends observations, high-resolution analyses/models, radar, soundings and other inputs.
 
 References:
 - https://developer.weather.com/docs/openapi/hourly-forecast-3-0
+- https://developer.weather.com/docs/openapi/daily-forecast-3-0-0
 - https://developer.weather.com/docs/faqs
 
 ## Scientific model
 
 ### Stage 1 — sequential bias state
 
-Use a station- and clock-hour-aware state-space correction (Kalman / adaptive MOS) rather than an arbitrary residual shift. The state is the current TWC temperature bias. Each new routine observation updates the bias estimate and its uncertainty. Lead-time persistence is estimated from historical residual autocorrelation and allowed to vary by station, season, local hour, and regime.
+Use a station- and clock-hour-aware state-space correction (Kalman / adaptive MOS) rather than an arbitrary residual shift. The state is the current TWC hourly-temperature bias. Each new routine observation updates the bias estimate and its uncertainty. Lead-time persistence is estimated from historical residual autocorrelation and allowed to vary by station, season, local hour, and regime.
 
 This follows established surface-temperature post-processing literature: adaptive Kalman filters have repeatedly reduced 2-m temperature bias, and lead-time/diurnal Kalman corrections outperform static corrections in many settings.
 
@@ -38,7 +40,7 @@ References:
 
 ### Stage 2 — mechanism-conditioned residual model
 
-For every observation time `t`, calculate errors relative to the TWC forecast valid at `t`:
+For every observation time `t`, calculate errors relative to the pre-day TWC forecast valid at `t`:
 
 - `e_T`: temperature error
 - `d(e_T)/dt`: heating/cooling-rate error over the latest 1–3 h
@@ -50,6 +52,7 @@ For every observation time `t`, calculate errors relative to the TWC forecast va
 - time since observed daily high and remaining solar runway
 - six-hour maximum constraint
 - upwind thermal-gradient/advection features, gated by a coherent wind vector
+- difference between the TWC calendar-day high prior and the peak of the hourly path
 
 Predict the future TWC residual separately at +1, +2, +3, +4 and +6 h. Use a regularized dynamic regression/GAM or ridge model first; only move to tree boosting after a walk-forward comparison shows a real gain. The sequential Kalman state is an input and a fallback, not a competing unvalidated hand rule.
 
@@ -62,6 +65,7 @@ The mechanism label is diagnostic evidence, not a causal claim by itself.
 - cloud-cover error and temperature heating-rate error have physically consistent signs
 - unexpected extra cloud -> less short-wave energy -> less remaining daytime heating
 - unexpected clearing -> more solar heating runway
+- cloud fraction alone is not enough: cloud optical thickness and timing matter, so the historical coefficient must be learned from observed heating-rate consequences
 
 Cloud/radiation errors are a documented major source of 2-m temperature error. Studies have directly linked cloud-cover errors to surface-temperature errors and surface short-wave radiation errors.
 
@@ -73,12 +77,14 @@ References:
 **Moisture / latent-heat miss**
 - meaningful dew-point error and/or unexpected precipitation
 - evaluate together with heating-rate error and cloud/radiation, not dew point alone
-- a moister-than-forecast boundary layer can change the partition between sensible and latent heat; it is supporting evidence, not a fixed degree-for-degree temperature adjustment
+- a moister-than-forecast boundary layer can change the partition between sensible and latent heat, but dew point is supporting evidence rather than a fixed degree-for-degree temperature adjustment
+- if dew point changes together with a wind-vector change, prefer an air-mass/advection interpretation over an isolated “humidity cap” story
 
 **Advection / breeze / frontal miss**
 - wind-vector error, direction transition, or speed error
 - coherent upwind temperature/dew-point gradient
 - abrupt changes should shorten persistence of the previous local temperature bias; a stable coherent wind regime can transport the upwind anomaly into later hours
+- in coastal cities, explicitly learn flow-sector effects because sea-breeze timing can reset the temperature trajectory
 
 Near-surface forecast errors are strongly regime- and flow-dependent, particularly when boundary-layer forcing changes.
 
@@ -98,7 +104,7 @@ Reference:
 
 There are two different historical problems and they must not be mixed:
 
-1. **Exact historical TWC forecast revisions.** Public TWC documentation provides current forecasts and historical *conditions*, but not a simple public archive of every past point forecast/revision. Mercury therefore starts its own 15-minute TWC snapshot archive now. Do not invent historical TWC trajectories from later observations.
+1. **Exact historical TWC forecast revisions.** Public TWC documentation exposes current forecasts and historical *conditions*, but not a simple public archive of every past point-forecast revision. Mercury therefore starts its own 15-minute TWC snapshot archive now. Do not reconstruct supposed TWC trajectories from observations after the fact.
 2. **Physical prior / mechanism training.** Backfill years of archived HRRR/RAP/NBM forecasts plus METAR observations for the same stations. This gives a large, timestamp-clean hindcast set for learning how cloud, dew point, wind and heating-rate errors map into future temperature residuals. Those coefficients are a prior only; station-specific TWC coefficients are updated as Mercury's exact TWC archive grows.
 
 TWC History on Demand is useful for historical analyzed conditions (including temperature, dew point, wind and global horizontal irradiance), not as a substitute for archived point forecasts:
@@ -109,7 +115,7 @@ TWC History on Demand is useful for historical analyzed conditions (including te
 No random train/test split.
 
 - expanding-window or rolling-origin validation by date
-- preserve issuance time; no feature may use data that arrived after the simulated decision time
+- preserve issuance/capture time; no feature may use data that arrived after the simulated decision time
 - separate seasons and local clock hours
 - evaluate raw TWC, simple latest-residual persistence, Kalman-only, and mechanism-conditioned model
 - hourly metrics: MAE, RMSE, bias by lead time
@@ -122,6 +128,7 @@ No random train/test split.
 
 The final output should be a distribution, not only a single adaptive line:
 
+- use the TWC `calendarDayTemperatureMax` as a forecast prior/feature, not a hard constraint
 - simulate correlated future hourly residual paths from the calibrated lead-time error covariance
 - add them to the TWC hourly curve
 - impose hard observed constraints (current max and official six-hour maxima)
