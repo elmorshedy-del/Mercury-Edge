@@ -16,8 +16,8 @@ export default function WeatherDashboardPage() {
     <>
       <SixHourReleaseStrip />
       <DsmReleaseStrip />
-      <WeatherDashboardClient />
       <WeatherReactionDesk />
+      <WeatherDashboardClient />
     </>
   );
 }
