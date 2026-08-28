@@ -94,16 +94,11 @@ function chooseEvent(markets: KalshiMarket[], date: string, timezone: string) {
     groups.set(market.event_ticker, group);
   }
 
-  const candidates = [...groups.entries()].map(([eventTicker, items]) => {
+  for (const [eventTicker, items] of groups.entries()) {
     const close = items.map((item) => item.close_time ?? item.expected_expiration_time ?? "").find(Boolean) ?? "";
-    const dateMatch = close ? localDate(close, timezone) === date : false;
-    const closeMs = close ? new Date(close).getTime() : Number.POSITIVE_INFINITY;
-    return { eventTicker, items, close, dateMatch, closeMs };
-  });
-
-  return candidates.find((candidate) => candidate.dateMatch)
-    ?? candidates.sort((a, b) => a.closeMs - b.closeMs)[0]
-    ?? null;
+    if (close && localDate(close, timezone) === date) return { eventTicker, items, close };
+  }
+  return null;
 }
 
 async function discoverEvent(seriesTicker: string, date: string, timezone: string) {
@@ -161,11 +156,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({
         stid,
         date: targetDate,
+        timezone: station.timezone,
         seriesTicker: station.kalshiSeries,
         eventTicker: null,
         markets: [],
         marketCenter: [],
+        leader: null,
         twcRevisions: await twcRevisionMarkers(stid, targetDate),
+        updatedAt: new Date().toISOString(),
       });
     }
 
