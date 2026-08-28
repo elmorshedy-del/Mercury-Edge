@@ -6,8 +6,6 @@ import { buildMarketCenter, quoteMid, type MarketSeries } from "@/lib/weather/ma
 
 export const dynamic = "force-dynamic";
 
-type AnyRecord = Record<string, unknown>;
-
 type KalshiMarket = {
   ticker: string;
   event_ticker: string;
@@ -183,7 +181,7 @@ export async function GET(request: NextRequest) {
             time: point.capturedAt,
             yesBid: point.yesBid,
             yesAsk: point.yesAsk,
-            lastPrice: point.lastPrice,
+            lastPrice: point.lastPrice ?? null,
           })))
         .catch((error) => {
           console.error(`Unable to load candles for ${market.ticker}`, error);
