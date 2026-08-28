@@ -27,10 +27,7 @@ const VARS = [
 ].join(",");
 
 const USER_AGENT = process.env.SOURCE_USER_AGENT || "Mercury-Edge weather dashboard (weather trajectory research)";
-const AWC_HEADERS = {
-  "User-Agent": USER_AGENT,
-  Accept: "application/json",
-};
+const AWC_HEADERS = { "User-Agent": USER_AGENT, Accept: "application/json" };
 
 type AnyRecord = Record<string, unknown>;
 
@@ -70,28 +67,40 @@ type ForecastBaseline = {
   localDate: string;
   issuedAt: string | null;
   capturedAt: string;
+  forecastHigh: number | null;
   points: ForecastPoint[];
 };
 
-type ForecastSnapshot = ForecastBaseline & { allPoints: ForecastPoint[] };
+type ForecastSnapshot = ForecastBaseline & {
+  allPoints: ForecastPoint[];
+  dailyHighs: Record<string, number | null>;
+};
 
 type BaselineDbRow = {
   local_date: string;
   issued_at: Date | null;
   captured_at: Date;
+  forecast_high: number | null;
   points: ForecastPoint[];
 };
 
+type SnapshotDbRow = {
+  captured_at: Date;
+  issued_at: Date | null;
+  points: ForecastPoint[];
+  daily_highs: Record<string, number | null> | null;
+};
+
 declare global {
-  var weatherBaselineMemoryV2: Map<string, ForecastBaseline> | undefined;
-  var twcForecastMemory: Map<string, { value: ForecastSnapshot; expires: number }> | undefined;
-  var weatherBaselineTableReadyV2: Promise<void> | undefined;
+  var weatherBaselineMemoryV3: Map<string, ForecastBaseline> | undefined;
+  var twcForecastMemoryV2: Map<string, { value: ForecastSnapshot; expires: number }> | undefined;
+  var weatherBaselineTableReadyV3: Promise<void> | undefined;
 }
 
-const baselineMemory = global.weatherBaselineMemoryV2 ?? new Map<string, ForecastBaseline>();
-const forecastMemory = global.twcForecastMemory ?? new Map<string, { value: ForecastSnapshot; expires: number }>();
-if (!global.weatherBaselineMemoryV2) global.weatherBaselineMemoryV2 = baselineMemory;
-if (!global.twcForecastMemory) global.twcForecastMemory = forecastMemory;
+const baselineMemory = global.weatherBaselineMemoryV3 ?? new Map<string, ForecastBaseline>();
+const forecastMemory = global.twcForecastMemoryV2 ?? new Map<string, { value: ForecastSnapshot; expires: number }>();
+if (!global.weatherBaselineMemoryV3) global.weatherBaselineMemoryV3 = baselineMemory;
+if (!global.twcForecastMemoryV2) global.twcForecastMemoryV2 = forecastMemory;
 
 function keyFor(obs: AnyRecord, prefix: string) {
   return Object.keys(obs).find((key) => key.startsWith(prefix)) ?? null;
@@ -201,7 +210,6 @@ function classify(raw: string | null): Row["kind"] {
 function normalizeStation(station: AnyRecord) {
   const obs = (station.OBSERVATIONS ?? {}) as AnyRecord;
   const dates = Array.isArray(obs.date_time) ? (obs.date_time as unknown[]) : [];
-
   const keys = {
     temp: keyFor(obs, "air_temp_set_"),
     dewPoint: keyFor(obs, "dew_point_temperature_set_"),
@@ -250,18 +258,7 @@ function normalizeStation(station: AnyRecord) {
   const official = rows.filter((row) => row.kind === "official").slice(-18).reverse();
   const sixHour = rows.filter((row) => row.high6 !== null || row.low6 !== null).slice(-6).reverse();
   const daily = rows.filter((row) => row.high24 !== null || row.low24 !== null).slice(-4).reverse();
-
-  return {
-    stid: station.STID,
-    name: station.NAME,
-    timezone: station.TIMEZONE,
-    latest,
-    hf,
-    official,
-    sixHour,
-    daily,
-    hfAvailable: hf.length > 0,
-  };
+  return { stid: station.STID, name: station.NAME, timezone: station.TIMEZONE, latest, hf, official, sixHour, daily, hfAvailable: hf.length > 0 };
 }
 
 function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
@@ -271,16 +268,12 @@ function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
   const tempC = num(item.temp);
   const dewC = num(item.dewp);
   const obsTime = num(item.obsTime);
-  const time = obsTime !== null
-    ? new Date(obsTime * 1000).toISOString()
-    : str(item.reportTime) ?? str(item.receiptTime) ?? "";
+  const time = obsTime !== null ? new Date(obsTime * 1000).toISOString() : str(item.reportTime) ?? str(item.receiptTime) ?? "";
   if (!time) return null;
-
   const maxFromRaw = parseSixHourFromRaw(raw, "1");
   const minFromRaw = parseSixHourFromRaw(raw, "2");
   const awcMax = floorCToF(num(item.maxT));
   const awcMin = floorCToF(num(item.minT));
-
   return {
     stid,
     row: {
@@ -309,11 +302,9 @@ async function fetchAwcLatest() {
   const url = new URL("https://aviationweather.gov/api/data/metar");
   url.searchParams.set("ids", STATIONS.map((station) => station.stid).join(","));
   url.searchParams.set("format", "json");
-
   const response = await fetch(url, { headers: AWC_HEADERS, cache: "no-store" });
   if (response.status === 204) return new Map<string, Row>();
   if (!response.ok) throw new Error(`AWC METAR request failed (${response.status})`);
-
   const payload = await response.json();
   const byStation = new Map<string, Row>();
   if (Array.isArray(payload)) {
@@ -321,9 +312,7 @@ async function fetchAwcLatest() {
       const normalized = normalizeAwc(item as AnyRecord);
       if (!normalized) continue;
       const existing = byStation.get(normalized.stid);
-      if (!existing || new Date(normalized.row.time).getTime() > new Date(existing.time).getTime()) {
-        byStation.set(normalized.stid, normalized.row);
-      }
+      if (!existing || new Date(normalized.row.time).getTime() > new Date(existing.time).getTime()) byStation.set(normalized.stid, normalized.row);
     }
   }
   return byStation;
@@ -332,25 +321,16 @@ async function fetchAwcLatest() {
 function mergeAwc<T extends { latest: Row | null; official: Row[]; sixHour: Row[] }>(station: T, awc: Row | undefined): T {
   if (!awc) return station;
   const sameReport = (row: Row) => row.raw === awc.raw || Math.abs(new Date(row.time).getTime() - new Date(awc.time).getTime()) < 30_000;
-  const official = [awc, ...station.official.filter((row) => !sameReport(row))]
-    .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-    .slice(0, 18);
+  const official = [awc, ...station.official.filter((row) => !sameReport(row))].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 18);
   const sixHour = awc.high6 !== null || awc.low6 !== null
-    ? [awc, ...station.sixHour.filter((row) => !sameReport(row))]
-        .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-        .slice(0, 6)
+    ? [awc, ...station.sixHour.filter((row) => !sameReport(row))].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 6)
     : station.sixHour;
   const latest = !station.latest || new Date(awc.time).getTime() >= new Date(station.latest.time).getTime() ? awc : station.latest;
   return { ...station, official, sixHour, latest };
 }
 
 function localDate(timezone: string, date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
 function twcKey() {
@@ -359,8 +339,8 @@ function twcKey() {
 
 async function ensureForecastTables() {
   if (!hasDatabase) return;
-  if (!global.weatherBaselineTableReadyV2) {
-    global.weatherBaselineTableReadyV2 = (async () => {
+  if (!global.weatherBaselineTableReadyV3) {
+    global.weatherBaselineTableReadyV3 = (async () => {
       await query(`
         CREATE TABLE IF NOT EXISTS weather_trajectory_baselines_v2 (
           stid text NOT NULL,
@@ -373,6 +353,7 @@ async function ensureForecastTables() {
           PRIMARY KEY (stid, local_date, source)
         )
       `);
+      await query(`ALTER TABLE weather_trajectory_baselines_v2 ADD COLUMN IF NOT EXISTS forecast_high real`);
       await query(`
         CREATE TABLE IF NOT EXISTS weather_forecast_snapshots (
           stid text NOT NULL,
@@ -383,9 +364,10 @@ async function ensureForecastTables() {
           PRIMARY KEY (stid, source, captured_at)
         )
       `);
+      await query(`ALTER TABLE weather_forecast_snapshots ADD COLUMN IF NOT EXISTS daily_highs jsonb`);
     })();
   }
-  await global.weatherBaselineTableReadyV2;
+  await global.weatherBaselineTableReadyV3;
 }
 
 function snapshotBucket(date = new Date()) {
@@ -393,34 +375,39 @@ function snapshotBucket(date = new Date()) {
   return new Date(Math.floor(date.getTime() / bucket) * bucket).toISOString();
 }
 
-async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<ForecastSnapshot> {
-  const cached = forecastMemory.get(config.stid);
-  if (cached && cached.expires > Date.now()) return cached.value;
-
-  const apiKey = twcKey();
-  if (!apiKey) throw new Error("TWC_API_KEY is not configured");
-
-  const url = new URL("https://api.weather.com/v3/wx/forecast/hourly/2day");
+async function twcJson(path: string, config: (typeof STATIONS)[number], apiKey: string) {
+  const url = new URL(`https://api.weather.com${path}`);
   url.searchParams.set("geocode", `${config.lat},${config.lon}`);
   url.searchParams.set("units", "e");
   url.searchParams.set("language", "en-US");
   url.searchParams.set("format", "json");
   url.searchParams.set("apiKey", apiKey);
-
   const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`TWC hourly forecast failed for ${config.stid} (${response.status})`);
-  const rawPayload = await response.json();
-  const payload = (rawPayload?.["v3-wx-forecast-hourly-2day"] ?? rawPayload) as AnyRecord;
+  if (!response.ok) throw new Error(`TWC request failed for ${config.stid}: ${path} (${response.status})`);
+  return response.json();
+}
 
-  const times = Array.isArray(payload.validTimeLocal) ? payload.validTimeLocal : [];
-  const temps = Array.isArray(payload.temperature) ? payload.temperature : [];
-  const dew = Array.isArray(payload.temperatureDewPoint) ? payload.temperatureDewPoint : [];
-  const clouds = Array.isArray(payload.cloudCover) ? payload.cloudCover : [];
-  const windSpeed = Array.isArray(payload.windSpeed) ? payload.windSpeed : [];
-  const windDirection = Array.isArray(payload.windDirection) ? payload.windDirection : [];
-  const precipChance = Array.isArray(payload.precipChance) ? payload.precipChance : [];
-  const uvIndex = Array.isArray(payload.uvIndex) ? payload.uvIndex : [];
-  const expiration = Array.isArray(payload.expirationTimeUtc) ? payload.expirationTimeUtc : [];
+async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<ForecastSnapshot> {
+  const cached = forecastMemory.get(config.stid);
+  if (cached && cached.expires > Date.now()) return cached.value;
+  const apiKey = twcKey();
+  if (!apiKey) throw new Error("TWC_API_KEY is not configured");
+
+  const [hourlyRaw, dailyRaw] = await Promise.all([
+    twcJson("/v3/wx/forecast/hourly/2day", config, apiKey),
+    twcJson("/v3/wx/forecast/daily/3day", config, apiKey),
+  ]);
+  const hourly = (hourlyRaw?.["v3-wx-forecast-hourly-2day"] ?? hourlyRaw) as AnyRecord;
+  const daily = (dailyRaw?.["v3-wx-forecast-daily-3day"] ?? dailyRaw) as AnyRecord;
+
+  const times = Array.isArray(hourly.validTimeLocal) ? hourly.validTimeLocal : [];
+  const temps = Array.isArray(hourly.temperature) ? hourly.temperature : [];
+  const dew = Array.isArray(hourly.temperatureDewPoint) ? hourly.temperatureDewPoint : [];
+  const clouds = Array.isArray(hourly.cloudCover) ? hourly.cloudCover : [];
+  const windSpeed = Array.isArray(hourly.windSpeed) ? hourly.windSpeed : [];
+  const windDirection = Array.isArray(hourly.windDirection) ? hourly.windDirection : [];
+  const precipChance = Array.isArray(hourly.precipChance) ? hourly.precipChance : [];
+  const uvIndex = Array.isArray(hourly.uvIndex) ? hourly.uvIndex : [];
 
   const allPoints: ForecastPoint[] = times.map((time, index) => ({
     time: String(time),
@@ -433,30 +420,70 @@ async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<Fore
     uvIndex: num(uvIndex[index]),
   })).filter((point) => Number.isFinite(point.temp));
 
+  const dailyTimes = Array.isArray(daily.validTimeLocal) ? daily.validTimeLocal : [];
+  const calendarMax = Array.isArray(daily.calendarDayTemperatureMax) ? daily.calendarDayTemperatureMax : [];
+  const daypartMax = Array.isArray(daily.temperatureMax) ? daily.temperatureMax : [];
+  const dailyHighs: Record<string, number | null> = {};
+  dailyTimes.forEach((time, index) => {
+    const date = String(time).slice(0, 10);
+    dailyHighs[date] = num(calendarMax[index]) ?? num(daypartMax[index]);
+  });
+
   const date = localDate(config.timezone);
   const points = allPoints.filter((point) => localDate(config.timezone, new Date(point.time)) === date);
-  const expiryValues = expiration.map((value) => num(value)).filter((value): value is number => value !== null);
-  const issuedAt = expiryValues.length ? new Date(Math.min(...expiryValues) * 1000).toISOString() : null;
   const capturedAt = new Date().toISOString();
-  const value: ForecastSnapshot = { source: "twc", localDate: date, issuedAt, capturedAt, points, allPoints };
+  const value: ForecastSnapshot = {
+    source: "twc",
+    localDate: date,
+    issuedAt: null,
+    capturedAt,
+    forecastHigh: dailyHighs[date] ?? null,
+    points,
+    allPoints,
+    dailyHighs,
+  };
   forecastMemory.set(config.stid, { value, expires: Date.now() + 10 * 60 * 1000 });
 
   if (hasDatabase) {
     await ensureForecastTables();
     await query(
-      `INSERT INTO weather_forecast_snapshots (stid, source, captured_at, issued_at, points)
-       VALUES ($1, 'twc', $2::timestamptz, $3::timestamptz, $4::jsonb)
+      `INSERT INTO weather_forecast_snapshots (stid, source, captured_at, issued_at, points, daily_highs)
+       VALUES ($1, 'twc', $2::timestamptz, NULL, $3::jsonb, $4::jsonb)
        ON CONFLICT (stid, source, captured_at) DO NOTHING`,
-      [config.stid, snapshotBucket(new Date(capturedAt)), issuedAt, JSON.stringify(allPoints)],
+      [config.stid, snapshotBucket(new Date(capturedAt)), JSON.stringify(allPoints), JSON.stringify(dailyHighs)],
     );
   }
-
   return value;
+}
+
+async function getPreDaySnapshot(config: (typeof STATIONS)[number], date: string): Promise<ForecastBaseline | null> {
+  if (!hasDatabase) return null;
+  const result = await query<SnapshotDbRow>(
+    `SELECT captured_at, issued_at, points, daily_highs
+     FROM weather_forecast_snapshots
+     WHERE stid = $1 AND source = 'twc'
+       AND captured_at < ($2::date::timestamp AT TIME ZONE $3)
+     ORDER BY captured_at DESC
+     LIMIT 1`,
+    [config.stid, date, config.timezone],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const points = (row.points ?? []).filter((point) => localDate(config.timezone, new Date(point.time)) === date);
+  if (!points.length) return null;
+  return {
+    source: "twc",
+    localDate: date,
+    issuedAt: row.issued_at ? row.issued_at.toISOString() : null,
+    capturedAt: row.captured_at.toISOString(),
+    forecastHigh: row.daily_highs?.[date] ?? null,
+    points,
+  };
 }
 
 async function getDailyBaseline(config: (typeof STATIONS)[number], current: ForecastSnapshot | null): Promise<ForecastBaseline | null> {
   const date = localDate(config.timezone);
-  const cacheKey = `${config.stid}:${date}:twc`;
+  const cacheKey = `${config.stid}:${date}:twc:v3`;
   const inMemory = baselineMemory.get(cacheKey);
   if (inMemory) return inMemory;
 
@@ -464,7 +491,7 @@ async function getDailyBaseline(config: (typeof STATIONS)[number], current: Fore
     await ensureForecastTables();
     if (hasDatabase) {
       const existing = await query<BaselineDbRow>(
-        `SELECT local_date::text, issued_at, captured_at, points
+        `SELECT local_date::text, issued_at, captured_at, forecast_high, points
          FROM weather_trajectory_baselines_v2
          WHERE stid = $1 AND local_date = $2::date AND source = 'twc'`,
         [config.stid, date],
@@ -476,6 +503,7 @@ async function getDailyBaseline(config: (typeof STATIONS)[number], current: Fore
           localDate: row.local_date,
           issuedAt: row.issued_at ? row.issued_at.toISOString() : null,
           capturedAt: row.captured_at.toISOString(),
+          forecastHigh: row.forecast_high,
           points: row.points,
         };
         baselineMemory.set(cacheKey, baseline);
@@ -483,24 +511,25 @@ async function getDailyBaseline(config: (typeof STATIONS)[number], current: Fore
       }
     }
 
-    if (!current?.points.length) return null;
-    const fresh: ForecastBaseline = {
+    const preDay = await getPreDaySnapshot(config, date);
+    const fresh: ForecastBaseline | null = preDay ?? (current?.points.length ? {
       source: "twc",
       localDate: current.localDate,
       issuedAt: current.issuedAt,
       capturedAt: current.capturedAt,
+      forecastHigh: current.forecastHigh,
       points: current.points,
-    };
+    } : null);
+    if (!fresh) return null;
 
     if (hasDatabase) {
       await query(
-        `INSERT INTO weather_trajectory_baselines_v2 (stid, local_date, source, timezone, issued_at, captured_at, points)
-         VALUES ($1, $2::date, 'twc', $3, $4::timestamptz, $5::timestamptz, $6::jsonb)
+        `INSERT INTO weather_trajectory_baselines_v2 (stid, local_date, source, timezone, issued_at, captured_at, forecast_high, points)
+         VALUES ($1, $2::date, 'twc', $3, $4::timestamptz, $5::timestamptz, $6, $7::jsonb)
          ON CONFLICT (stid, local_date, source) DO NOTHING`,
-        [config.stid, fresh.localDate, config.timezone, fresh.issuedAt, fresh.capturedAt, JSON.stringify(fresh.points)],
+        [config.stid, fresh.localDate, config.timezone, fresh.issuedAt, fresh.capturedAt, fresh.forecastHigh, JSON.stringify(fresh.points)],
       );
     }
-
     baselineMemory.set(cacheKey, fresh);
     return fresh;
   } catch (error) {
@@ -540,16 +569,10 @@ export async function GET() {
     const payload = await response.json();
 
     if (!response.ok || payload?.SUMMARY?.RESPONSE_CODE !== 1) {
-      return NextResponse.json(
-        { error: payload?.SUMMARY?.RESPONSE_MESSAGE ?? "Synoptic request failed" },
-        { status: 502 },
-      );
+      return NextResponse.json({ error: payload?.SUMMARY?.RESPONSE_MESSAGE ?? "Synoptic request failed" }, { status: 502 });
     }
 
-    const byId = new Map<string, AnyRecord>(
-      (payload.STATION ?? []).map((station: AnyRecord) => [String(station.STID), station]),
-    );
-
+    const byId = new Map<string, AnyRecord>((payload.STATION ?? []).map((station: AnyRecord) => [String(station.STID), station]));
     const stations = STATIONS.map((config, index) => {
       const raw = byId.get(config.stid);
       const normalized = raw
@@ -566,14 +589,11 @@ export async function GET() {
         officialSource: "AWC-first / Synoptic-backup",
         forecastSource: "The Weather Company",
         forecastConfigured: Boolean(twcKey()),
-        trajectoryModel: "twc-kalman-0.1-provisional",
+        trajectoryModel: "twc-kalman-0.2-provisional",
       },
       { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } },
     );
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to fetch weather data" },
-      { status: 502 },
-    );
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to fetch weather data" }, { status: 502 });
   }
 }
