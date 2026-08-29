@@ -4,6 +4,7 @@ import { SixHourReleaseStrip } from "@/components/SixHourReleaseStrip";
 import { DsmReleaseStrip } from "@/components/DsmReleaseStrip";
 import { WeatherReactionDesk } from "@/components/WeatherReactionDesk";
 import { LaxCapWatch } from "@/components/LaxCapWatch";
+import { FullDayHfArchive } from "@/components/FullDayHfArchive";
 
 export const metadata: Metadata = {
   title: "Weather Reports | Mercury Edge",
@@ -19,6 +20,7 @@ export default function WeatherDashboardPage() {
       <DsmReleaseStrip />
       <WeatherReactionDesk />
       <LaxCapWatch />
+      <FullDayHfArchive />
       <WeatherDashboardClient />
     </>
   );
