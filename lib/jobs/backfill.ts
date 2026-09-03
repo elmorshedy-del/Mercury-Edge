@@ -2,7 +2,7 @@ import type { StationConfig } from "../config";
 import { pool } from "../db";
 import { getMetars } from "../sources/awc";
 import { getHighFrequencyArchive } from "../sources/iem";
-import { getEvent, getMinuteCandles, marketToBand } from "../sources/kalshi";
+import { getEvent, getMarketTrades, getMinuteCandles, marketToBand } from "../sources/kalshi";
 import { eventTickerForDate, isLocalDate } from "../time";
 import type { ObservationPoint } from "../types";
 
@@ -12,6 +12,7 @@ export type BackfillDayResult = {
   eventTicker: string;
   contracts: number;
   quotes: number;
+  trades: number;
   observations: number;
   actualReceiptObservations: number;
   discoveryOnlyObservations: number;
@@ -36,17 +37,21 @@ async function saveObservations(points: ObservationPoint[]) {
     await pool!.query(
       `INSERT INTO weather_observations
         (station_code, source, report_type, observed_at, received_at, receipt_quality,
-         temperature_f, settlement_compatible, source_precision, raw_text)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         temperature_f, max_temperature_f, max_temperature_kind, settlement_compatible,
+         source_precision, raw_text, raw_payload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (station_code, source, report_type, observed_at, raw_text) DO UPDATE SET
         received_at=EXCLUDED.received_at,
         receipt_quality=EXCLUDED.receipt_quality,
         temperature_f=EXCLUDED.temperature_f,
+        max_temperature_f=EXCLUDED.max_temperature_f,
+        max_temperature_kind=EXCLUDED.max_temperature_kind,
         settlement_compatible=EXCLUDED.settlement_compatible`,
       [point.station, point.source, point.reportType, point.observedAt, point.receivedAt,
-       point.receiptQuality, point.temperatureF, point.settlementCompatible,
+       point.receiptQuality, point.temperatureF, point.maxTemperatureF ?? null,
+       point.maxTemperatureKind ?? null, point.settlementCompatible,
        point.source === "NOAA_AWC" ? "0.1C source / exact conversion" : "0.1C MADIS archive",
-       point.rawText ?? ""],
+       point.rawText ?? "", point.payload ?? {}],
     );
   }
 }
@@ -80,6 +85,7 @@ export async function backfillDay(
   const windowStart = new Date(noon.getTime() - 18 * 60 * 60 * 1000);
   const windowEnd = new Date(noon.getTime() + 30 * 60 * 60 * 1000);
   let quotes = 0;
+  let trades = 0;
   for (const market of markets) {
     const band = marketToBand(market);
     await pool.query(
@@ -96,21 +102,46 @@ export async function backfillDay(
     for (const quote of candles) {
       await pool.query(
         `INSERT INTO market_quotes
-          (contract_ticker, captured_at, yes_bid, yes_ask, last_price)
-         VALUES ($1,$2,$3,$4,$5)
+          (contract_ticker, captured_at, yes_bid, yes_ask, last_price,
+           yes_bid_open, yes_bid_low, yes_bid_high, yes_ask_open, yes_ask_low, yes_ask_high,
+           last_price_open, last_price_low, last_price_high)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT (contract_ticker, captured_at) DO UPDATE SET
           yes_bid=EXCLUDED.yes_bid, yes_ask=EXCLUDED.yes_ask,
-          last_price=EXCLUDED.last_price`,
-        [quote.contractTicker, quote.capturedAt, quote.yesBid, quote.yesAsk, quote.lastPrice ?? null],
+          last_price=EXCLUDED.last_price,
+          yes_bid_open=EXCLUDED.yes_bid_open, yes_bid_low=EXCLUDED.yes_bid_low,
+          yes_bid_high=EXCLUDED.yes_bid_high, yes_ask_open=EXCLUDED.yes_ask_open,
+          yes_ask_low=EXCLUDED.yes_ask_low, yes_ask_high=EXCLUDED.yes_ask_high,
+          last_price_open=EXCLUDED.last_price_open, last_price_low=EXCLUDED.last_price_low,
+          last_price_high=EXCLUDED.last_price_high`,
+        [quote.contractTicker, quote.capturedAt, quote.yesBid, quote.yesAsk, quote.lastPrice ?? null,
+         quote.yesBidOpen ?? null, quote.yesBidLow ?? null, quote.yesBidHigh ?? null,
+         quote.yesAskOpen ?? null, quote.yesAskLow ?? null, quote.yesAskHigh ?? null,
+         quote.lastPriceOpen ?? null, quote.lastPriceLow ?? null, quote.lastPriceHigh ?? null],
       );
     }
     quotes += candles.length;
+
+    const tape = await getMarketTrades(market.ticker, windowStart, windowEnd);
+    for (const trade of tape) {
+      await pool.query(
+        `INSERT INTO market_trades
+          (trade_id, contract_ticker, created_at, yes_price, no_price, quantity,
+           taker_outcome_side, taker_book_side, is_block_trade, raw_payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (trade_id) DO NOTHING`,
+        [trade.tradeId, trade.contractTicker, trade.createdAt, trade.yesPrice, trade.noPrice,
+         trade.quantity, trade.takerOutcomeSide, trade.takerBookSide, trade.isBlockTrade, trade],
+      );
+    }
+    trades += tape.length;
   }
 
-  const ageDays = (Date.now() - windowEnd.getTime()) / 86_400_000;
+  const weatherAsOf = new Date(Math.min(windowEnd.getTime(), Date.now()));
+  const ageDays = (Date.now() - weatherAsOf.getTime()) / 86_400_000;
   let observations: ObservationPoint[] = [];
-  if (ageDays <= 15) {
-    const reports = await getMetars(station.station, windowEnd, 48);
+  if (ageDays <= 30) {
+    const reports = await getMetars(station.station, weatherAsOf, 48);
     observations = reports.filter((point) => isLocalDate(point.observedAt, date, station.timezone));
   } else if (station.iemNetwork) {
     observations = await getHighFrequencyArchive(
@@ -127,6 +158,7 @@ export async function backfillDay(
     eventTicker,
     contracts: markets.length,
     quotes,
+    trades,
     observations: observations.length,
     actualReceiptObservations: observations.filter((point) => point.receiptQuality === "actual").length,
     discoveryOnlyObservations: observations.filter((point) => point.receiptQuality === "discovery_only").length,

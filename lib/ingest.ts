@@ -83,14 +83,15 @@ export async function ingestStation(station: StationConfig, at = new Date()): Pr
         await client.query(
           `INSERT INTO weather_observations
             (station_code, source, report_type, observed_at, received_at, receipt_quality,
-             temperature_f, dewpoint_f, wind_direction_deg, wind_speed_kt, pressure_hpa,
-             sky_cover, precipitation_in, settlement_compatible, source_precision,
-             raw_text, raw_payload)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             temperature_f, max_temperature_f, max_temperature_kind, dewpoint_f,
+             wind_direction_deg, wind_speed_kt, pressure_hpa, sky_cover, precipitation_in,
+             settlement_compatible, source_precision, raw_text, raw_payload)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
            ON CONFLICT (station_code, source, report_type, observed_at, raw_text) DO NOTHING`,
           [
             point.station, point.source, point.reportType, point.observedAt, point.receivedAt,
-            point.receiptQuality, point.temperatureF, point.dewpointF,
+            point.receiptQuality, point.temperatureF, point.maxTemperatureF ?? null,
+            point.maxTemperatureKind ?? null, point.dewpointF,
             typeof point.windDirection === "number" ? point.windDirection : null,
             point.windSpeedKt, point.pressureHpa, point.skyCover, point.precipitationIn,
             point.settlementCompatible, "0.1C source / exact conversion", point.rawText, point.payload,
@@ -200,14 +201,24 @@ export async function ingestStation(station: StationConfig, at = new Date()): Pr
       await transaction(async (client) => {
         for (const quote of candles) {
           await client.query(
-            `INSERT INTO market_quotes
-              (contract_ticker, captured_at, yes_bid, yes_ask, last_price, bid_size, ask_size)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
+          `INSERT INTO market_quotes
+              (contract_ticker, captured_at, yes_bid, yes_ask, last_price,
+               yes_bid_open, yes_bid_low, yes_bid_high, yes_ask_open, yes_ask_low, yes_ask_high,
+               last_price_open, last_price_low, last_price_high, bid_size, ask_size)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
              ON CONFLICT (contract_ticker, captured_at) DO UPDATE SET
               yes_bid = EXCLUDED.yes_bid, yes_ask = EXCLUDED.yes_ask,
-              last_price = EXCLUDED.last_price`,
+              last_price = EXCLUDED.last_price,
+              yes_bid_open = EXCLUDED.yes_bid_open, yes_bid_low = EXCLUDED.yes_bid_low,
+              yes_bid_high = EXCLUDED.yes_bid_high, yes_ask_open = EXCLUDED.yes_ask_open,
+              yes_ask_low = EXCLUDED.yes_ask_low, yes_ask_high = EXCLUDED.yes_ask_high,
+              last_price_open = EXCLUDED.last_price_open, last_price_low = EXCLUDED.last_price_low,
+              last_price_high = EXCLUDED.last_price_high`,
             [quote.contractTicker, quote.capturedAt, quote.yesBid, quote.yesAsk,
-             quote.lastPrice ?? null, quote.bidSize ?? null, quote.askSize ?? null],
+             quote.lastPrice ?? null, quote.yesBidOpen ?? null, quote.yesBidLow ?? null,
+             quote.yesBidHigh ?? null, quote.yesAskOpen ?? null, quote.yesAskLow ?? null,
+             quote.yesAskHigh ?? null, quote.lastPriceOpen ?? null, quote.lastPriceLow ?? null,
+             quote.lastPriceHigh ?? null, quote.bidSize ?? null, quote.askSize ?? null],
           );
         }
       });
