@@ -2,7 +2,7 @@
 
 Mercury Edge is a Railway-ready research dashboard for testing whether official-station weather information reaches prediction-market prices with a measurable lag. Its core rule is simple: preserve every clock and never use information before it was available.
 
-The current release implements the deterministic receipt-to-repricing engine, persistent website-controlled research jobs, and three source-linked case studies. It deliberately labels missing receipt timestamps and minute-candle execution limits instead of filling them with assumptions.
+The current release implements an evidence-tiered elimination-episode engine, persistent website-controlled research jobs, and three source-linked case studies. It deliberately labels missing receipt timestamps, unverified settlement transformations, candle resolution, and counterfactual fills instead of filling them with assumptions.
 
 ## What it measures
 
@@ -27,9 +27,9 @@ The evidence is classified before it is scored:
 | [NWS API](https://api.weather.gov/) | DSM and Daily Climate Report (CLI) products | product `issuanceTime` |
 | [NOAA MADIS OMO](https://madis.ncep.noaa.gov/madis_OMO.shtml) | One-minute ASOS observations | source receipt when available |
 | [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/) | High-frequency historical discovery and raw products | discovery time only for pages without receipt metadata |
-| [Kalshi public API](https://docs.kalshi.com/) | Events, contract bands, and one-minute candles | candle end time |
+| [Kalshi public API](https://docs.kalshi.com/) | Current/historical events, contract bands, one-minute candles, and public trades | candle end or exact trade time |
 
-Archived IEM high-frequency rows that lack the original source receipt are stored with `receipt_quality=discovery_only`. They can inform station trajectory studies, but the engine automatically rejects them as executable latency evidence.
+Archived IEM high-frequency rows that lack the original source receipt are stored with `receipt_quality=discovery_only`. They can find candidate days, but cannot support decision-latency or profit claims. AWC's rolling archive preserves `receiptTime`; Mercury also parses precise `T` groups and six-/24-hour maximum-temperature groups from the raw METAR. Settlement compatibility remains a separate, fail-closed gate.
 
 ## Local setup
 
@@ -112,13 +112,23 @@ curl -X POST https://your-app.up.railway.app/api/jobs \
 
 The mechanical engine:
 
-- sorts observations by source receipt time, not observation time;
-- ignores settlement-incompatible measurements;
-- takes only the first quote at or after receipt within a configured tolerance;
-- never treats an archive discovery timestamp as an original receipt;
-- records failed gates instead of silently dropping unattractive cases;
-- reports minute candles as quote proxies, never guaranteed fills;
-- separates gross outcome, estimated fees, and net outcome.
+- runs a discovery lane for every report and a separate hard-state lane only for audited settlement-compatible transformations;
+- tags the exact trigger source, report type, raw group, receipt quality, and whether a six-/24-hour maximum caused the boundary crossing;
+- emits an episode only when a new whole-degree boundary makes an additional lower bucket impossible;
+- labels an episode `violent` only after the fact when the pre-trigger YES bid was at least 20¢ and fell at least 25¢ within 15 minutes;
+- reports minute-candle reaction latency as a 60-second interval, never as an exact second or a fill;
+- uses exact public trade timestamps to show observed competing NO-taker quantity, while labeling its P&L counterfactual;
+- leaves L2-simulated P&L blank until the existing sequenced replay applies decision latency, displayed depth, queue assumptions, and a verified event-time fee schedule. Candle/tape counterfactuals currently disclose a quadratic `M=1` fee assumption.
+
+Run a historical census with the dashboard pipeline or:
+
+```bash
+npm run migrate
+npm run backfill -- --from=2026-08-01 --to=2026-08-31 --stations=KLAX
+npm run backtest -- --from=2026-08-01 --to=2026-08-31 --stations=KLAX
+```
+
+The Episodes tab can then filter all eliminations, violent days, proven triggers, or days with public tape. A high proxy return is a research lead, not a realized return: public trade history proves another participant traded, and minute candles do not preserve the resting order book.
 
 See [docs/BACKTEST_PROTOCOL.md](docs/BACKTEST_PROTOCOL.md) for the cross-city and changing-climate validation plan.
 

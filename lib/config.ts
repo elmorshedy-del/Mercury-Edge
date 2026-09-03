@@ -34,7 +34,7 @@ export const SOURCE_USER_AGENT =
   process.env.SOURCE_USER_AGENT ?? "MercuryEdge/0.1 research@example.com";
 
 export const KALSHI_BASE_URL =
-  "https://api.elections.kalshi.com/trade-api/v2";
+  process.env.KALSHI_BASE_URL ?? "https://external-api.kalshi.com/trade-api/v2";
 
 export const AWC_BASE_URL = "https://aviationweather.gov/api/data";
 export const NWS_BASE_URL = "https://api.weather.gov";

@@ -167,11 +167,12 @@
 }
 .stationTable .tableHead,
 .stationTable .tableRow { grid-template-columns: 1fr repeat(5, minmax(86px, 0.8fr)); }
-.signalTable { min-width: 1050px; }
+.signalTable { min-width: 1260px; }
 .signalTable .tableHead,
-.signalTable .tableRow { grid-template-columns: 75px 110px minmax(190px, 1.5fr) 135px 75px 75px 90px 85px; }
+.signalTable .tableRow { grid-template-columns: 145px minmax(145px, 1fr) minmax(180px, 1.2fr) 85px 70px 105px 105px minmax(180px, 1.2fr); }
+.coverageTable { min-width: 880px; }
 .coverageTable .tableHead,
-.coverageTable .tableRow { grid-template-columns: 1fr repeat(5, minmax(100px, 0.9fr)); }
+.coverageTable .tableRow { grid-template-columns: 1fr repeat(6, minmax(92px, 0.9fr)); }
 
 .tableHead {
   min-height: 36px;
@@ -194,7 +195,8 @@
 }
 
 .pass,
-.diagnostic {
+.diagnostic,
+.violent {
   display: inline-flex;
   width: fit-content;
   border-radius: 99px;
@@ -205,6 +207,42 @@
 }
 .pass { color: #1c6d5d; background: rgba(185, 239, 189, 0.34); }
 .diagnostic { color: #9a5d2b; background: rgba(233, 154, 85, 0.13); }
+.violent { color: #a6372d; background: rgba(196, 73, 58, 0.13); }
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(7, 23, 19, 0.09);
+  background: #fbfaf5;
+}
+
+.filters button {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 1px solid rgba(7, 23, 19, 0.13);
+  border-radius: 99px;
+  background: white;
+  color: #6e7a73;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.filters .activeFilter {
+  border-color: #1c6d5d;
+  background: #d4ffd2;
+  color: #071713;
+}
+
+.filters small {
+  margin-left: auto;
+  color: #6e7a73;
+  font-size: 8px;
+  white-space: nowrap;
+}
 
 .auditGrid {
   display: grid;
@@ -274,6 +312,7 @@
   .netMetric { grid-column: 1 / -1; }
   .metrics strong { font-size: 21px; }
   .tabs button { min-width: 94px; padding: 12px 13px; }
+  .filters { padding: 10px 12px; }
   .snapshotRow {
     grid-template-columns: 62px minmax(0, 1fr) auto;
     gap: 8px;

@@ -13,10 +13,15 @@ Question: after a settlement-compatible report is publicly received, how long do
 Primary outcomes:
 
 - source receipt to first quote;
-- source receipt to `yes_ask ≤ 0.05`;
-- executable-proxy count and percentage;
-- gross and fee-adjusted profit for a fixed one-contract rule;
+- source receipt to `yes_ask ≤ 0.05`, expressed as an interval when only minute candles survive;
+- pre-trigger YES bid and its maximum decline over the next 15 minutes;
+- observed public NO-taker quantity after each latency assumption;
+- one-contract candle proxy, public-tape counterfactual, and L2-simulated P&L as separate fields;
 - sensitivity to 30, 60, and 90-second quote tolerances.
+
+The standard `violent` view is a post-event census filter, not a trading rule: pre-trigger YES bid at least 20¢ and bid collapse at least 25¢ within 15 minutes. Report all threshold variants and the unfiltered elimination universe so the label cannot create look-ahead performance.
+
+Evidence is promoted in one direction only: weather-only → minute-candle proxy → observed public tape → sequenced L2 simulation. A trade print establishes what another taker received; it never establishes Mercury's queue priority. Only the final tier may estimate available fill, and even that result remains simulated rather than realized.
 
 Climate change has little direct bearing on this mechanical study. Source infrastructure, market participation, city, day of week, market age, and time of day are the important regimes.
 

@@ -1,8 +1,8 @@
 import { runMechanicalLatencyBacktest, DEFAULT_ENGINE_CONFIG } from "./engine";
-import { estimateFee } from "./fees";
+import { predictionTakerFee } from "../paper/fees";
 import { pool } from "../db";
 import { isLocalDate } from "../time";
-import type { ContractBand, ObservationPoint, QuotePoint } from "../types";
+import type { ContractBand, MarketTrade, ObservationPoint, QuotePoint } from "../types";
 
 type EventRow = {
   event_ticker: string;
@@ -28,7 +28,7 @@ export async function executeBacktest(
   const runResult = await pool.query<{ id: string }>(
     `INSERT INTO backtest_runs
       (name, model_version, started_at, as_of_start, as_of_end, config, status, job_id)
-     VALUES ('Mechanical receipt-to-reprice', 'latency-v0.1.0', $1, $2::date,
+     VALUES ('Violent elimination episode census', 'elimination-v0.2.0', $1, $2::date,
              ($3::date + interval '1 day'), $4, 'running', $5)
      RETURNING id`,
     [startedAt, from, to, { ...DEFAULT_ENGINE_CONFIG, stations: options.stations ?? [] }, options.jobId ?? null],
@@ -44,11 +44,17 @@ export async function executeBacktest(
   );
 
   let signalCount = 0;
-  let executableCount = 0;
-  let wins = 0;
-  let resolved = 0;
-  let gross = 0;
-  let fees = 0;
+  let violentCount = 0;
+  let hardStateCount = 0;
+  let candidateProxyCount = 0;
+  let tapeObservedSignals = 0;
+  let tapeObservedQuantity = 0;
+  let tapeCounterfactualCount = 0;
+  let tapeCounterfactualNet = 0;
+  let proxyWins = 0;
+  let proxyResolved = 0;
+  let proxyGross = 0;
+  let proxyFees = 0;
   let processed = 0;
 
   try {
@@ -85,10 +91,13 @@ export async function executeBacktest(
       const observationResult = await pool.query<{
         station_code: string; source: string; report_type: ObservationPoint["reportType"];
         observed_at: Date; received_at: Date; receipt_quality: ObservationPoint["receiptQuality"];
-        temperature_f: string; settlement_compatible: boolean; raw_text: string | null;
+        temperature_f: string; max_temperature_f: string | null;
+        max_temperature_kind: ObservationPoint["maxTemperatureKind"];
+        settlement_compatible: boolean; raw_text: string | null;
       }>(
         `SELECT station_code, source, report_type, observed_at, received_at, receipt_quality,
-                temperature_f, settlement_compatible, raw_text
+                temperature_f, max_temperature_f, max_temperature_kind,
+                settlement_compatible, raw_text
            FROM weather_observations
           WHERE station_code = $1
             AND observed_at >= $2::date - interval '1 day'
@@ -106,6 +115,8 @@ export async function executeBacktest(
           receivedAt: row.received_at.toISOString(),
           receiptQuality: row.receipt_quality,
           temperatureF: Number(row.temperature_f),
+          maxTemperatureF: row.max_temperature_f === null ? null : Number(row.max_temperature_f),
+          maxTemperatureKind: row.max_temperature_kind,
           settlementCompatible: row.settlement_compatible,
           rawText: row.raw_text ?? undefined,
         }))
@@ -113,8 +124,15 @@ export async function executeBacktest(
       const quoteResult = await pool.query<{
         contract_ticker: string; captured_at: Date; yes_bid: string | null;
         yes_ask: string | null; last_price: string | null;
+        yes_bid_open: string | null; yes_bid_low: string | null; yes_bid_high: string | null;
+        yes_ask_open: string | null; yes_ask_low: string | null; yes_ask_high: string | null;
+        last_price_open: string | null; last_price_low: string | null; last_price_high: string | null;
+        source_precision: QuotePoint["sourcePrecision"];
       }>(
-        `SELECT contract_ticker, captured_at, yes_bid, yes_ask, last_price
+        `SELECT contract_ticker, captured_at, yes_bid, yes_ask, last_price,
+                yes_bid_open, yes_bid_low, yes_bid_high,
+                yes_ask_open, yes_ask_low, yes_ask_high,
+                last_price_open, last_price_low, last_price_high, source_precision
            FROM market_quotes
           WHERE contract_ticker = ANY($1::text[])
           ORDER BY captured_at`,
@@ -126,16 +144,67 @@ export async function executeBacktest(
         yesBid: row.yes_bid === null ? null : Number(row.yes_bid),
         yesAsk: row.yes_ask === null ? null : Number(row.yes_ask),
         lastPrice: row.last_price === null ? null : Number(row.last_price),
+        yesBidOpen: row.yes_bid_open === null ? null : Number(row.yes_bid_open),
+        yesBidLow: row.yes_bid_low === null ? null : Number(row.yes_bid_low),
+        yesBidHigh: row.yes_bid_high === null ? null : Number(row.yes_bid_high),
+        yesAskOpen: row.yes_ask_open === null ? null : Number(row.yes_ask_open),
+        yesAskLow: row.yes_ask_low === null ? null : Number(row.yes_ask_low),
+        yesAskHigh: row.yes_ask_high === null ? null : Number(row.yes_ask_high),
+        lastPriceOpen: row.last_price_open === null ? null : Number(row.last_price_open),
+        lastPriceLow: row.last_price_low === null ? null : Number(row.last_price_low),
+        lastPriceHigh: row.last_price_high === null ? null : Number(row.last_price_high),
+        sourcePrecision: row.source_precision,
       }));
 
-      const signals = runMechanicalLatencyBacktest(event.station_code, contracts, observations, quotes);
+      const tradeResult = await pool.query<{
+        trade_id: string; contract_ticker: string; created_at: Date;
+        yes_price: string; no_price: string; quantity: string;
+        taker_outcome_side: MarketTrade["takerOutcomeSide"];
+        taker_book_side: MarketTrade["takerBookSide"]; is_block_trade: boolean;
+      }>(
+        `SELECT trade_id, contract_ticker, created_at, yes_price, no_price, quantity,
+                taker_outcome_side, taker_book_side, is_block_trade
+           FROM market_trades
+          WHERE contract_ticker = ANY($1::text[])
+          ORDER BY created_at`,
+        [tickers],
+      );
+      const trades: MarketTrade[] = tradeResult.rows.map((row) => ({
+        tradeId: row.trade_id,
+        contractTicker: row.contract_ticker,
+        createdAt: row.created_at.toISOString(),
+        yesPrice: Number(row.yes_price),
+        noPrice: Number(row.no_price),
+        quantity: Number(row.quantity),
+        takerOutcomeSide: row.taker_outcome_side,
+        takerBookSide: row.taker_book_side,
+        isBlockTrade: row.is_block_trade,
+      }));
+
+      const signals = runMechanicalLatencyBacktest(
+        event.station_code,
+        contracts,
+        observations,
+        quotes,
+        DEFAULT_ENGINE_CONFIG,
+        trades,
+      );
       for (const signal of signals) {
         const contract = contracts.find((item) => item.ticker === signal.contractTicker);
         const resolvedOutcome = contract?.result === "no" ? "win" : contract?.result === "yes" ? "loss" : null;
-        const grossProfit = signal.entryPrice === null || !resolvedOutcome
+        const grossProfit = !signal.candidateProxy || signal.entryPrice === null || !resolvedOutcome
           ? null
           : resolvedOutcome === "win" ? 1 - signal.entryPrice : -signal.entryPrice;
-        const fee = signal.entryPrice === null ? null : estimateFee(signal.entryPrice);
+        const feeQuote = signal.candidateProxy && signal.entryPrice !== null
+          ? predictionTakerFee({
+              feeType: "quadratic",
+              feeMultiplier: DEFAULT_ENGINE_CONFIG.feeMultiplier,
+              contracts: 1,
+              price: signal.entryPrice,
+            })
+          : null;
+        const fee = feeQuote?.netFee ?? null;
+        const proxyNet = grossProfit === null || fee === null ? null : grossProfit - fee;
         await pool.query(
           `INSERT INTO backtest_signals
             (run_id, event_ticker, contract_ticker, station_code, edge_class,
@@ -150,16 +219,57 @@ export async function executeBacktest(
            signal.quoteCapturedAt, signal.reactionAt, signal.reactionLagSeconds,
            resolvedOutcome, grossProfit, fee, grossProfit === null || fee === null ? null : grossProfit - fee,
            signal.executableProxy, signal.limitation,
-           { receiptGate: signal.executableProxy ? "passed" : "failed", model: "mechanical_only" }],
+           {
+             schemaVersion: 1,
+             model: "violent_elimination_episode",
+             alignmentClock: signal.alignmentClock,
+             triggerSource: signal.triggerSource,
+             triggerReportType: signal.triggerReportType,
+             triggerKind: signal.triggerKind,
+             triggerReceiptQuality: signal.triggerReceiptQuality,
+             triggerRawText: signal.triggerRawText,
+             hardStateProven: signal.hardStateProven,
+             candidateProxy: signal.candidateProxy,
+             evidenceTier: signal.evidenceTier,
+             violent: signal.violent,
+             violentMoveCents: signal.violentMoveCents,
+             preTriggerYesBid: signal.preTriggerYesBid,
+             preTriggerYesMid: signal.preTriggerYesMid,
+             postWindowLowYesBid: signal.postWindowLowYesBid,
+             staleEdgeCents: signal.staleEdgeCents,
+             reactionLagLowerSeconds: signal.reactionLagLowerSeconds,
+             reactionLagUpperSeconds: signal.reactionLagUpperSeconds,
+             assumedDecisionLatencyMs: DEFAULT_ENGINE_CONFIG.assumedDecisionLatencyMs,
+             observedNoTakerQuantity: signal.observedNoTakerQuantity,
+             observedNoTakerVwap: signal.observedNoTakerVwap,
+             tapeCounterfactualNetProfit: signal.tapeCounterfactualNetProfit,
+             profitStatus: signal.profitStatus,
+             proxyNetProfit: proxyNet,
+             receiptGate: signal.triggerReceiptQuality === "actual" ? "passed" : "failed",
+             settlementGate: signal.hardStateProven ? "passed" : "failed",
+             executionGate: "not_run_no_sequenced_l2_replay",
+             feeModel: feeQuote?.formula ?? null,
+             feeMultiplier: DEFAULT_ENGINE_CONFIG.feeMultiplier,
+           }],
         );
         signalCount += 1;
-        if (signal.executableProxy) executableCount += 1;
-        if (resolvedOutcome) {
-          resolved += 1;
-          if (resolvedOutcome === "win") wins += 1;
+        if (signal.violent) violentCount += 1;
+        if (signal.hardStateProven) hardStateCount += 1;
+        if (signal.candidateProxy) candidateProxyCount += 1;
+        if (signal.observedNoTakerQuantity > 0) {
+          tapeObservedSignals += 1;
+          tapeObservedQuantity += signal.observedNoTakerQuantity;
         }
-        if (grossProfit !== null) gross += grossProfit;
-        if (fee !== null) fees += fee;
+        if (signal.tapeCounterfactualNetProfit !== null) {
+          tapeCounterfactualCount += 1;
+          tapeCounterfactualNet += signal.tapeCounterfactualNetProfit;
+        }
+        if (signal.candidateProxy && resolvedOutcome) {
+          proxyResolved += 1;
+          if (resolvedOutcome === "win") proxyWins += 1;
+        }
+        if (grossProfit !== null) proxyGross += grossProfit;
+        if (grossProfit !== null && fee !== null) proxyFees += fee;
       }
       processed += 1;
       await options.onProgress?.({
@@ -171,14 +281,24 @@ export async function executeBacktest(
     const summary = {
       events: eventResult.rowCount,
       signals: signalCount,
-      executableSignals: executableCount,
-      resolved,
-      wins,
-      winRate: resolved ? wins / resolved : null,
-      grossProfitPerOneContract: gross,
-      estimatedFees: fees,
-      netProfitPerOneContract: gross - fees,
-      warning: "Minute-candle backtests are quote proxies, not proof of fills or available size.",
+      violentSignals: violentCount,
+      hardStateSignals: hardStateCount,
+      candidateProxySignals: candidateProxyCount,
+      tradeTapeObservedSignals: tapeObservedSignals,
+      tradeTapeObservedQuantity: tapeObservedQuantity,
+      tradeTapeCounterfactualNetProfit: tapeCounterfactualCount ? tapeCounterfactualNet : null,
+      proxyResolved,
+      proxyWins,
+      proxyWinRate: proxyResolved ? proxyWins / proxyResolved : null,
+      proxyGrossProfitPerOneContract: candidateProxyCount ? proxyGross : null,
+      proxyEstimatedFees: candidateProxyCount ? proxyFees : null,
+      proxyNetProfitPerOneContract: candidateProxyCount ? proxyGross - proxyFees : null,
+      l2SimulatedSignals: 0,
+      l2SimulatedNetProfit: null,
+      feeAssumption: `quadratic_M_${DEFAULT_ENGINE_CONFIG.feeMultiplier}`,
+      executableSignals: 0,
+      netProfitPerOneContract: null,
+      warning: "Violence is a post-event filter. Candles are interval-censored price proxies; public tape is another taker's fill; counterfactuals use the configured fee multiplier; only a sequenced L2 replay can estimate our fill.",
     };
     await pool.query(
       `UPDATE backtest_runs SET finished_at=now(), status='success', summary=$2 WHERE id=$1`,

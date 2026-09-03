@@ -1,6 +1,7 @@
 import { AWC_BASE_URL } from "../config";
 import { fetchJson } from "../http";
 import type { ObservationPoint } from "../types";
+import { parseMetarHardState } from "../weather/metar-hard-state";
 
 type AwcReport = {
   icaoId: string;
@@ -36,26 +37,33 @@ export async function getMetars(
 
   return reports
     .filter((report) => typeof report.temp === "number")
-    .map((report) => ({
-      station,
-      source: "NOAA_AWC",
-      reportType: report.metarType ?? "METAR",
-      observedAt: new Date(report.obsTime * 1000).toISOString(),
-      receivedAt: new Date(report.receiptTime).toISOString(),
-      receiptQuality: "actual",
-      temperatureF: cToF(report.temp as number),
-      // AWC is an important upstream observation source, but a METAR current
-      // temperature is NOT automatically identical to the value/method used by
-      // the event's versioned settlement source. Hard-state strategies must earn
-      // compatibility through a separately audited settlement transformation.
-      settlementCompatible: false,
-      rawText: report.rawOb,
-      dewpointF: typeof report.dewp === "number" ? cToF(report.dewp) : null,
-      windDirection: (report.wdir as number | string | undefined) ?? null,
-      windSpeedKt: typeof report.wspd === "number" ? report.wspd : null,
-      pressureHpa: typeof report.altim === "number" ? report.altim : null,
-      skyCover: typeof report.cover === "string" ? report.cover : null,
-      precipitationIn: typeof report.precip === "number" ? report.precip : null,
-      payload: report,
-    }));
+    .map((report) => {
+      const hardState = parseMetarHardState(report.rawOb);
+      return {
+        station,
+        source: "NOAA_AWC",
+        reportType: report.metarType ?? "METAR",
+        observedAt: new Date(report.obsTime * 1000).toISOString(),
+        receivedAt: new Date(report.receiptTime).toISOString(),
+        receiptQuality: "actual" as const,
+        // Prefer the unambiguous tenth-Celsius T group when present. The
+        // decoded field remains the fallback for stations that omit it.
+        temperatureF: hardState.preciseTemperatureF ?? cToF(report.temp as number),
+        maxTemperatureF: hardState.maximumTemperatureF,
+        maxTemperatureKind: hardState.maximumKind,
+        // AWC is an important upstream observation source, but a METAR current
+        // temperature is NOT automatically identical to the value/method used by
+        // the event's versioned settlement source. Hard-state strategies must earn
+        // compatibility through a separately audited settlement transformation.
+        settlementCompatible: false,
+        rawText: report.rawOb,
+        dewpointF: typeof report.dewp === "number" ? cToF(report.dewp) : null,
+        windDirection: (report.wdir as number | string | undefined) ?? null,
+        windSpeedKt: typeof report.wspd === "number" ? report.wspd : null,
+        pressureHpa: typeof report.altim === "number" ? report.altim : null,
+        skyCover: typeof report.cover === "string" ? report.cover : null,
+        precipitationIn: typeof report.precip === "number" ? report.precip : null,
+        payload: report,
+      };
+    });
 }
