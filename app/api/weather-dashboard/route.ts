@@ -540,8 +540,6 @@ async function getDailyBaseline(config: (typeof STATIONS)[number], current: Fore
 
 export async function GET() {
   const token = process.env.SYNOPTIC_TOKEN;
-  if (!token) return NextResponse.json({ error: "SYNOPTIC_TOKEN is not configured" }, { status: 500 });
-
   const url = new URL("https://api.synopticdata.com/v2/stations/timeseries");
   url.searchParams.set("stid", STATIONS.map((s) => s.stid).join(","));
   url.searchParams.set("recent", "1080");
@@ -551,13 +549,42 @@ export async function GET() {
   url.searchParams.set("hfmetars", "1");
   url.searchParams.set("qc", "on");
   url.searchParams.set("qc_flags", "off");
-  url.searchParams.set("token", token);
+  if (token) url.searchParams.set("token", token);
 
   try {
-    const [response, awcByStation, currentForecasts] = await Promise.all([
-      fetch(url, { cache: "no-store" }),
+    const synopticPromise = token
+      ? fetch(url, { cache: "no-store" })
+          .then(async (response) => {
+            let payload: AnyRecord | null = null;
+            try {
+              payload = await response.json() as AnyRecord;
+            } catch {
+              // A provider outage or non-JSON error body must not take down the dashboard.
+            }
+            const summary = payload?.SUMMARY as AnyRecord | undefined;
+            const ok = response.ok && summary?.RESPONSE_CODE === 1;
+            if (!ok) {
+              const message = str(summary?.RESPONSE_MESSAGE) ?? `Synoptic request failed (${response.status})`;
+              console.warn(`Synoptic HF-ASOS unavailable; continuing without it: ${message}`);
+              return { payload: null as AnyRecord | null, available: false, message };
+            }
+            return { payload, available: true, message: null as string | null };
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : "Synoptic request failed";
+            console.warn(`Synoptic HF-ASOS unavailable; continuing without it: ${message}`);
+            return { payload: null as AnyRecord | null, available: false, message };
+          })
+      : Promise.resolve({
+          payload: null as AnyRecord | null,
+          available: false,
+          message: "SYNOPTIC_TOKEN is not configured",
+        });
+
+    const [synoptic, awcByStation, currentForecasts] = await Promise.all([
+      synopticPromise,
       fetchAwcLatest().catch((error) => {
-        console.error("AWC low-latency METAR fetch failed; falling back to Synoptic", error);
+        console.error("AWC low-latency METAR fetch failed", error);
         return new Map<string, Row>();
       }),
       Promise.all(STATIONS.map((config) => fetchTwcForecast(config).catch((error) => {
@@ -566,13 +593,9 @@ export async function GET() {
       }))),
     ]);
     const baselines = await Promise.all(STATIONS.map((config, index) => getDailyBaseline(config, currentForecasts[index])));
-    const payload = await response.json();
 
-    if (!response.ok || payload?.SUMMARY?.RESPONSE_CODE !== 1) {
-      return NextResponse.json({ error: payload?.SUMMARY?.RESPONSE_MESSAGE ?? "Synoptic request failed" }, { status: 502 });
-    }
-
-    const byId = new Map<string, AnyRecord>((payload.STATION ?? []).map((station: AnyRecord) => [String(station.STID), station]));
+    const stationRows = Array.isArray(synoptic.payload?.STATION) ? synoptic.payload.STATION as AnyRecord[] : [];
+    const byId = new Map<string, AnyRecord>(stationRows.map((station) => [String(station.STID), station]));
     const stations = STATIONS.map((config, index) => {
       const raw = byId.get(config.stid);
       const normalized = raw
@@ -586,7 +609,11 @@ export async function GET() {
       {
         updatedAt: new Date().toISOString(),
         stations,
-        officialSource: "AWC-first / Synoptic-backup",
+        officialSource: synoptic.available ? "AWC-first / Synoptic-backup" : "AWC (Synoptic unavailable)",
+        synopticAvailable: synoptic.available,
+        synopticMessage: synoptic.available
+          ? null
+          : `Synoptic HF-ASOS unavailable${synoptic.message ? `: ${synoptic.message}` : ""}. Official AWC and TWC data continue normally.`,
         forecastSource: "The Weather Company",
         forecastConfigured: Boolean(twcKey()),
         trajectoryModel: "twc-kalman-0.2-provisional",
