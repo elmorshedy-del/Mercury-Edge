@@ -302,30 +302,42 @@ async function fetchAwcLatest() {
   const url = new URL("https://aviationweather.gov/api/data/metar");
   url.searchParams.set("ids", STATIONS.map((station) => station.stid).join(","));
   url.searchParams.set("format", "json");
+  url.searchParams.set("hours", "18");
   const response = await fetch(url, { headers: AWC_HEADERS, cache: "no-store" });
-  if (response.status === 204) return new Map<string, Row>();
+  if (response.status === 204) return new Map<string, Row[]>();
   if (!response.ok) throw new Error(`AWC METAR request failed (${response.status})`);
   const payload = await response.json();
-  const byStation = new Map<string, Row>();
+  const byStation = new Map<string, Row[]>();
   if (Array.isArray(payload)) {
     for (const item of payload) {
       const normalized = normalizeAwc(item as AnyRecord);
       if (!normalized) continue;
-      const existing = byStation.get(normalized.stid);
-      if (!existing || new Date(normalized.row.time).getTime() > new Date(existing.time).getTime()) byStation.set(normalized.stid, normalized.row);
+      const rows = byStation.get(normalized.stid) ?? [];
+      rows.push(normalized.row);
+      byStation.set(normalized.stid, rows);
     }
+  }
+  for (const rows of byStation.values()) {
+    rows.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
   }
   return byStation;
 }
 
-function mergeAwc<T extends { latest: Row | null; official: Row[]; sixHour: Row[] }>(station: T, awc: Row | undefined): T {
-  if (!awc) return station;
-  const sameReport = (row: Row) => row.raw === awc.raw || Math.abs(new Date(row.time).getTime() - new Date(awc.time).getTime()) < 30_000;
-  const official = [awc, ...station.official.filter((row) => !sameReport(row))].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 18);
-  const sixHour = awc.high6 !== null || awc.low6 !== null
-    ? [awc, ...station.sixHour.filter((row) => !sameReport(row))].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 6)
-    : station.sixHour;
-  const latest = !station.latest || new Date(awc.time).getTime() >= new Date(station.latest.time).getTime() ? awc : station.latest;
+function mergeAwc<T extends { latest: Row | null; official: Row[]; sixHour: Row[] }>(station: T, awcRows: Row[] | undefined): T {
+  if (!awcRows?.length) return station;
+  const sameReport = (left: Row, right: Row) => left.raw === right.raw || Math.abs(new Date(left.time).getTime() - new Date(right.time).getTime()) < 30_000;
+  const official: Row[] = [];
+  for (const row of [...awcRows, ...station.official].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())) {
+    if (!official.some((existing) => sameReport(existing, row))) official.push(row);
+    if (official.length >= 18) break;
+  }
+  const sixHour: Row[] = [];
+  for (const row of [...awcRows, ...station.sixHour].filter((item) => item.high6 !== null || item.low6 !== null).sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())) {
+    if (!sixHour.some((existing) => sameReport(existing, row))) sixHour.push(row);
+    if (sixHour.length >= 6) break;
+  }
+  const awcLatest = awcRows[0];
+  const latest = !station.latest || new Date(awcLatest.time).getTime() >= new Date(station.latest.time).getTime() ? awcLatest : station.latest;
   return { ...station, official, sixHour, latest };
 }
 
@@ -585,7 +597,7 @@ export async function GET() {
       synopticPromise,
       fetchAwcLatest().catch((error) => {
         console.error("AWC low-latency METAR fetch failed", error);
-        return new Map<string, Row>();
+        return new Map<string, Row[]>();
       }),
       Promise.all(STATIONS.map((config) => fetchTwcForecast(config).catch((error) => {
         console.error(`TWC forecast unavailable for ${config.stid}`, error);
