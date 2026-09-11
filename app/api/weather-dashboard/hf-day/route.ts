@@ -20,6 +20,8 @@ const VARS = [
   "metar",
 ].join(",");
 
+const HF_UNAVAILABLE_MESSAGE = "Synoptic HF-ASOS is temporarily unavailable. Other dashboard feeds remain active.";
+
 type AnyRecord = Record<string, unknown>;
 
 type HfRow = {
@@ -104,7 +106,7 @@ function normalizeStation(station: AnyRecord, timezone: string): HfRow[] {
 
 export async function GET() {
   const token = process.env.SYNOPTIC_TOKEN;
-  if (!token) return NextResponse.json({ error: "SYNOPTIC_TOKEN is not configured" }, { status: 500 });
+  if (!token) return NextResponse.json({ error: HF_UNAVAILABLE_MESSAGE }, { status: 503 });
 
   const url = new URL("https://api.synopticdata.com/v2/stations/timeseries");
   url.searchParams.set("stid", STATIONS.map((station) => station.stid).join(","));
@@ -123,7 +125,8 @@ export async function GET() {
     const response = await fetch(url, { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok || payload?.SUMMARY?.RESPONSE_CODE !== 1) {
-      return NextResponse.json({ error: payload?.SUMMARY?.RESPONSE_MESSAGE ?? "Synoptic request failed" }, { status: 502 });
+      console.warn("Full-day HF-ASOS Synoptic request unavailable", payload?.SUMMARY?.RESPONSE_MESSAGE ?? response.status);
+      return NextResponse.json({ error: HF_UNAVAILABLE_MESSAGE }, { status: 503 });
     }
 
     const byId = new Map<string, AnyRecord>((payload.STATION ?? []).map((station: AnyRecord) => [String(station.STID), station]));
@@ -146,6 +149,6 @@ export async function GET() {
     );
   } catch (error) {
     console.error("Full-day HF-ASOS request failed", error);
-    return NextResponse.json({ error: "Unable to load full-day HF-ASOS history" }, { status: 502 });
+    return NextResponse.json({ error: HF_UNAVAILABLE_MESSAGE }, { status: 503 });
   }
 }
