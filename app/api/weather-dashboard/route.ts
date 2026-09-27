@@ -628,6 +628,11 @@ export async function GET() {
           : `Synoptic HF-ASOS unavailable${synoptic.message ? `: ${synoptic.message}` : ""}. Official AWC and TWC data continue normally.`,
         forecastSource: "The Weather Company",
         forecastConfigured: Boolean(twcKey()),
+        // TWS_API_KEY exists in Railway, but this build has no TWS client/endpoint wired yet.
+        // Expose that truth explicitly so the frontend never implies TWS connectivity.
+        twsConfigured: Boolean(process.env.TWS_API_KEY),
+        twsConnected: false,
+        twsStatus: process.env.TWS_API_KEY ? "not-wired" : "not-configured",
         trajectoryModel: "twc-kalman-0.2-provisional",
       },
       { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } },
