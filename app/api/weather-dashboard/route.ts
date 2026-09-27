@@ -94,13 +94,19 @@ type SnapshotDbRow = {
 declare global {
   var weatherBaselineMemoryV3: Map<string, ForecastBaseline> | undefined;
   var twcForecastMemoryV2: Map<string, { value: ForecastSnapshot; expires: number }> | undefined;
+  var twcForecastInFlightV1: Map<string, Promise<ForecastSnapshot>> | undefined;
+  var twcForecastFailureV1: Map<string, { message: string; expires: number }> | undefined;
   var weatherBaselineTableReadyV3: Promise<void> | undefined;
 }
 
 const baselineMemory = global.weatherBaselineMemoryV3 ?? new Map<string, ForecastBaseline>();
 const forecastMemory = global.twcForecastMemoryV2 ?? new Map<string, { value: ForecastSnapshot; expires: number }>();
+const forecastInFlight = global.twcForecastInFlightV1 ?? new Map<string, Promise<ForecastSnapshot>>();
+const forecastFailureMemory = global.twcForecastFailureV1 ?? new Map<string, { message: string; expires: number }>();
 if (!global.weatherBaselineMemoryV3) global.weatherBaselineMemoryV3 = baselineMemory;
 if (!global.twcForecastMemoryV2) global.twcForecastMemoryV2 = forecastMemory;
+if (!global.twcForecastInFlightV1) global.twcForecastInFlightV1 = forecastInFlight;
+if (!global.twcForecastFailureV1) global.twcForecastFailureV1 = forecastFailureMemory;
 
 function keyFor(obs: AnyRecord, prefix: string) {
   return Object.keys(obs).find((key) => key.startsWith(prefix)) ?? null;
@@ -345,8 +351,11 @@ function localDate(timezone: string, date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
+const TWC_CACHE_MS = 10 * 60 * 1000;
+const TWC_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+
 function twcKey() {
-  return process.env.TWC_API_KEY || process.env.WEATHER_API_KEY || null;
+  return process.env.TWC_API_KEY || process.env.TWS_API_KEY || process.env.WEATHER_API_KEY || null;
 }
 
 async function ensureForecastTables() {
@@ -400,12 +409,22 @@ async function twcJson(path: string, config: (typeof STATIONS)[number], apiKey: 
 }
 
 async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<ForecastSnapshot> {
+  const now = Date.now();
   const cached = forecastMemory.get(config.stid);
-  if (cached && cached.expires > Date.now()) return cached.value;
-  const apiKey = twcKey();
-  if (!apiKey) throw new Error("TWC_API_KEY is not configured");
+  if (cached && cached.expires > now) return cached.value;
 
-  const [hourlyRaw, dailyRaw] = await Promise.all([
+  const recentFailure = forecastFailureMemory.get(config.stid);
+  if (recentFailure && recentFailure.expires > now) throw new Error(recentFailure.message);
+
+  const inFlight = forecastInFlight.get(config.stid);
+  if (inFlight) return inFlight;
+
+  const apiKey = twcKey();
+  if (!apiKey) throw new Error("TWC/TWS_API_KEY is not configured");
+
+  const request = (async () => {
+    try {
+      const [hourlyRaw, dailyRaw] = await Promise.all([
     twcJson("/v3/wx/forecast/hourly/2day", config, apiKey),
     twcJson("/v3/wx/forecast/daily/3day", config, apiKey),
   ]);
@@ -454,18 +473,30 @@ async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<Fore
     allPoints,
     dailyHighs,
   };
-  forecastMemory.set(config.stid, { value, expires: Date.now() + 10 * 60 * 1000 });
+      forecastMemory.set(config.stid, { value, expires: Date.now() + TWC_CACHE_MS });
+      forecastFailureMemory.delete(config.stid);
 
-  if (hasDatabase) {
-    await ensureForecastTables();
-    await query(
-      `INSERT INTO weather_forecast_snapshots (stid, source, captured_at, issued_at, points, daily_highs)
-       VALUES ($1, 'twc', $2::timestamptz, NULL, $3::jsonb, $4::jsonb)
-       ON CONFLICT (stid, source, captured_at) DO NOTHING`,
-      [config.stid, snapshotBucket(new Date(capturedAt)), JSON.stringify(allPoints), JSON.stringify(dailyHighs)],
-    );
-  }
-  return value;
+      if (hasDatabase) {
+        await ensureForecastTables();
+        await query(
+          `INSERT INTO weather_forecast_snapshots (stid, source, captured_at, issued_at, points, daily_highs)
+           VALUES ($1, 'twc', $2::timestamptz, NULL, $3::jsonb, $4::jsonb)
+           ON CONFLICT (stid, source, captured_at) DO NOTHING`,
+          [config.stid, snapshotBucket(new Date(capturedAt)), JSON.stringify(allPoints), JSON.stringify(dailyHighs)],
+        );
+      }
+      return value;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TWC request failed";
+      forecastFailureMemory.set(config.stid, { message, expires: Date.now() + TWC_FAILURE_BACKOFF_MS });
+      throw error;
+    } finally {
+      forecastInFlight.delete(config.stid);
+    }
+  })();
+
+  forecastInFlight.set(config.stid, request);
+  return request;
 }
 
 async function getPreDaySnapshot(config: (typeof STATIONS)[number], date: string): Promise<ForecastBaseline | null> {
@@ -628,11 +659,14 @@ export async function GET() {
           : `Synoptic HF-ASOS unavailable${synoptic.message ? `: ${synoptic.message}` : ""}. Official AWC and TWC data continue normally.`,
         forecastSource: "The Weather Company",
         forecastConfigured: Boolean(twcKey()),
-        // TWS_API_KEY exists in Railway, but this build has no TWS client/endpoint wired yet.
-        // Expose that truth explicitly so the frontend never implies TWS connectivity.
-        twsConfigured: Boolean(process.env.TWS_API_KEY),
-        twsConnected: false,
-        twsStatus: process.env.TWS_API_KEY ? "not-wired" : "not-configured",
+        twsConfigured: Boolean(twcKey()),
+        twsConnected: currentForecasts.some(Boolean),
+        twsStatus: !twcKey() ? "not-configured" : currentForecasts.some(Boolean) ? "connected" : "disconnected",
+        twsLastVerifiedAt: currentForecasts
+          .filter((item): item is ForecastSnapshot => Boolean(item))
+          .map((item) => item.capturedAt)
+          .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null,
+        twsCacheSeconds: TWC_CACHE_MS / 1000,
         trajectoryModel: "twc-kalman-0.2-provisional",
       },
       { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } },
