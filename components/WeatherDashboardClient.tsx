@@ -321,22 +321,22 @@ function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoin
   }
   if (scores[0].key === "radiation") {
     const detail = cloudError !== null && cloudError > 0.12
-      ? "Cloudier than ${sourceLabel} during usable daylight: short-wave heating runway is being suppressed."
+      ? `Cloudier than ${sourceLabel} during usable daylight: short-wave heating runway is being suppressed.`
       : cloudError !== null && cloudError < -0.12
-        ? "Clearer than ${sourceLabel} during usable daylight: more solar heating runway remains than the baseline expected."
-        : "The observed heating rate is diverging from ${sourceLabel} during daylight; cloud/radiation is the leading diagnostic.";
+        ? `Clearer than ${sourceLabel} during usable daylight: more solar heating runway remains than the baseline expected.`
+        : `The observed heating rate is diverging from ${sourceLabel} during daylight; cloud/radiation is the leading diagnostic.`;
     return { key: "radiation", label: "Cloud / solar divergence", detail, evidence };
   }
   if (scores[0].key === "moisture") {
     return {
       key: "moisture",
       label: "Moisture divergence",
-      detail: dewError !== null && dewError > 0 ? "Boundary layer is moister than ${sourceLabel}. Treat the heating path as constrained until the moisture mismatch closes." : "Boundary layer is drier than ${sourceLabel}. Sensible heating may run differently from the original curve.",
+      detail: dewError !== null && dewError > 0 ? `Boundary layer is moister than ${sourceLabel}. Treat the heating path as constrained until the moisture mismatch closes.` : `Boundary layer is drier than ${sourceLabel}. Sensible heating may run differently from the original curve.`,
       evidence,
     };
   }
   if (scores[0].key === "advection") {
-    return { key: "advection", label: "Wind / advection divergence", detail: "The wind field differs materially from ${sourceLabel}. Local temperature bias can reset quickly if the wind direction or air mass changes.", evidence };
+    return { key: "advection", label: "Wind / advection divergence", detail: `The wind field differs materially from ${sourceLabel}. Local temperature bias can reset quickly if the wind direction or air mass changes.`, evidence };
   }
   return { key: "precip", label: "Precipitation regime break", detail: "Rain/convection arrived differently than forecast. Do not carry the pre-event temperature slope through the transition.", evidence };
 }
