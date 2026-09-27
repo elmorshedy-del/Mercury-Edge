@@ -58,14 +58,7 @@ type ForecastPoint = {
   cloudCover: number | null;
   windSpeed: number | null;
   windDirection: number | null;
-  windGust: number | null;
   precipChance: number | null;
-  qpf: number | null;
-  relativeHumidity: number | null;
-  pressureMeanSeaLevel: number | null;
-  visibility: number | null;
-  wxPhrase: string | null;
-  wxSeverity: number | null;
   uvIndex: number | null;
 };
 
@@ -432,8 +425,8 @@ async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<Fore
   const request = (async () => {
     try {
       const [hourlyRaw, dailyRaw] = await Promise.all([
-    twcJson("/v3/wx/forecast/hourly/1day", config, apiKey),
-    twcJson("/v3/wx/forecast/daily/7day", config, apiKey),
+    twcJson("/v3/wx/forecast/hourly/2day", config, apiKey),
+    twcJson("/v3/wx/forecast/daily/3day", config, apiKey),
   ]);
   const hourly = (hourlyRaw?.["v3-wx-forecast-hourly-2day"] ?? hourlyRaw) as AnyRecord;
   const daily = (dailyRaw?.["v3-wx-forecast-daily-3day"] ?? dailyRaw) as AnyRecord;
@@ -444,14 +437,7 @@ async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<Fore
   const clouds = Array.isArray(hourly.cloudCover) ? hourly.cloudCover : [];
   const windSpeed = Array.isArray(hourly.windSpeed) ? hourly.windSpeed : [];
   const windDirection = Array.isArray(hourly.windDirection) ? hourly.windDirection : [];
-  const windGust = Array.isArray(hourly.windGust) ? hourly.windGust : [];
   const precipChance = Array.isArray(hourly.precipChance) ? hourly.precipChance : [];
-  const qpf = Array.isArray(hourly.qpf) ? hourly.qpf : [];
-  const relativeHumidity = Array.isArray(hourly.relativeHumidity) ? hourly.relativeHumidity : [];
-  const pressureMeanSeaLevel = Array.isArray(hourly.pressureMeanSeaLevel) ? hourly.pressureMeanSeaLevel : [];
-  const visibility = Array.isArray(hourly.visibility) ? hourly.visibility : [];
-  const wxPhrase = Array.isArray(hourly.wxPhraseLong) ? hourly.wxPhraseLong : [];
-  const wxSeverity = Array.isArray(hourly.wxSeverity) ? hourly.wxSeverity : [];
   const uvIndex = Array.isArray(hourly.uvIndex) ? hourly.uvIndex : [];
 
   const allPoints: ForecastPoint[] = times.map((time, index) => ({
@@ -461,14 +447,7 @@ async function fetchTwcForecast(config: (typeof STATIONS)[number]): Promise<Fore
     cloudCover: num(clouds[index]) === null ? null : (num(clouds[index]) as number) / 100,
     windSpeed: num(windSpeed[index]),
     windDirection: num(windDirection[index]),
-    windGust: num(windGust[index]),
     precipChance: num(precipChance[index]),
-    qpf: num(qpf[index]),
-    relativeHumidity: num(relativeHumidity[index]),
-    pressureMeanSeaLevel: num(pressureMeanSeaLevel[index]),
-    visibility: num(visibility[index]),
-    wxPhrase: str(wxPhrase[index]),
-    wxSeverity: num(wxSeverity[index]),
     uvIndex: num(uvIndex[index]),
   })).filter((point) => Number.isFinite(point.temp));
 
