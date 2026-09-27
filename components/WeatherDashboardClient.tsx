@@ -19,6 +19,7 @@ type WeatherRow = {
   low24: number | null;
   raw: string | null;
   kind: "hf" | "official" | "other";
+  reportType?: "METAR" | "SPECI" | "HF" | "OTHER";
 };
 
 type ForecastPoint = {
@@ -143,6 +144,14 @@ function windLabel(row: WeatherRow) {
   const dir = row.windDirection === null ? "" : `${Math.round(row.windDirection)}°`;
   const speed = row.windSpeed === null ? "" : `${row.windSpeed.toFixed(0)} mph`;
   return [dir, speed].filter(Boolean).join(" · ");
+}
+
+function reportType(row: WeatherRow) {
+  if (row.reportType) return row.reportType;
+  if (row.raw?.startsWith("SPECI ")) return "SPECI";
+  if (row.kind === "hf") return "HF";
+  if (row.kind === "official") return "METAR";
+  return "OTHER";
 }
 
 function pollDelayMs() {
@@ -354,13 +363,20 @@ function buildTrajectory(station: Station) {
     .sort((a, b) => a.minute - b.minute);
   if (baselinePoints.length < 2) return null;
 
-  const routineMinute = inferRoutineMinute(station.official, station.timezone);
+  const routineReports = station.official.filter((row) => reportType(row) === "METAR");
+  const routineSource = routineReports.length ? routineReports : station.official;
+  const routineMinute = inferRoutineMinute(routineSource, station.timezone);
   const todayOfficial = station.official
     .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === baseline.localDate)
     .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
     .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
     .sort((a, b) => a.minute - b.minute);
-  const routineAnchors = todayOfficial.filter((item) => routineMinute === null || circularMinuteDistance(item.minute % 60, routineMinute) <= 4);
+  const todayRoutine = routineSource
+    .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === baseline.localDate)
+    .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
+    .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
+    .sort((a, b) => a.minute - b.minute);
+  const routineAnchors = todayRoutine.filter((item) => routineMinute === null || circularMinuteDistance(item.minute % 60, routineMinute) <= 4);
 
   const observedPoints: ObservedPoint[] = routineAnchors.map((item) => ({ minute: item.minute, temp: item.row.temp as number, time: item.row.time }));
   const precisePoints: ObservedPoint[] = todayOfficial.map((item) => ({ minute: item.minute, temp: item.row.temp as number, time: item.row.time }));
@@ -516,11 +532,11 @@ function StationCard({ station }: { station: Station }) {
     <article className={styles.card} id={station.stid}>
       <header className={styles.cardHeader}>
         <div><div className={styles.eyebrow}>{station.stid}</div><h2>{station.city}</h2><p>{station.name}</p></div>
-        <div className={styles.sourceBadge}>{station.hfAvailable ? "5-min HF live" : "Hourly only"}</div>
+        <div className={styles.sourceBadge}>{station.hfAvailable ? "5-min HF + official" : "METAR / SPECI"}</div>
       </header>
 
       <section className={styles.heroReadout}>
-        <div><span>Latest</span><strong>{temp(station.latest?.temp ?? null, station.latest?.kind === "official" ? 0 : 1)}</strong><small>{station.latest ? timeLabel(station.latest.time, station.timezone) : "No report"}</small></div>
+        <div><span>Latest</span><strong>{temp(station.latest?.temp ?? null, station.latest?.kind === "official" ? 0 : 1)}</strong><small>{station.latest ? `${timeLabel(station.latest.time, station.timezone)} · ${reportType(station.latest)}` : "No report"}</small></div>
         <div className={styles.miniStats}>
           <div><span>6h high</span><b>{temp(latest6?.high6 ?? null, 0)}</b></div>
           <div><span>6h low</span><b>{temp(latest6?.low6 ?? null, 0)}</b></div>
@@ -545,7 +561,7 @@ function StationCard({ station }: { station: Station }) {
         <div className={styles.sectionTitle}><div><span>Official stream</span><h3>Hourly / SPECI reports</h3></div><small>Raw tenth °C T-group → floor °F</small></div>
         <div className={styles.reportList}>
           {station.official.length ? station.official.map((row) => (
-            <details className={styles.report} key={`${row.time}-${row.raw ?? "official"}`}><summary><time>{timeLabel(row.time, station.timezone)}</time><b>{temp(row.temp, 0)}</b><span>{windLabel(row)}</span></summary><code>{row.raw ?? "No raw METAR text"}</code></details>
+            <details className={styles.report} key={`${row.time}-${row.raw ?? "official"}`}><summary><time>{timeLabel(row.time, station.timezone)} · {reportType(row)}</time><b>{temp(row.temp, 0)}</b><span>{windLabel(row)}</span></summary><code>{row.raw ?? "No raw METAR text"}</code></details>
           )) : <div className={styles.empty}>No official reports in the current window.</div>}
         </div>
       </section>
