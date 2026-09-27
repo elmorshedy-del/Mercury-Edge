@@ -64,7 +64,9 @@ type DashboardData = {
   forecastConfigured?: boolean;
   twsConfigured?: boolean;
   twsConnected?: boolean;
-  twsStatus?: "connected" | "disconnected" | "not-wired" | "not-configured";
+  twsStatus?: "connected" | "disconnected" | "not-configured";
+  twsLastVerifiedAt?: string | null;
+  twsCacheSeconds?: number;
   trajectoryModel?: string;
 };
 
@@ -605,12 +607,13 @@ export function WeatherDashboardClient() {
         {data && (
           <span className={`${styles.sourceStatus} ${data.twsConnected ? styles.sourceStatusGood : styles.sourceStatusBad}`}>
             <span className={data.twsConnected ? styles.goodDot : styles.badDot} />
-            TWS API: {data.twsConnected ? "connected" : data.twsConfigured ? "not connected" : "not configured"}
+            Weather Company: {data.twsConnected ? "connected" : data.twsConfigured ? "not connected" : "not configured"}
           </span>
         )}
       </div>
-      {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>TWS_API_KEY is present in Railway, but this deployed build is not making a TWS request yet, so TWS data is not being read or displayed.</div>}
-      {data && data.forecastConfigured === false && <div className={styles.notice}>TWC trajectory is coded but TWC_API_KEY is not configured on this deployment, so the trajectory panel will stay hidden until that server-side key is added.</div>}
+      {data?.twsConnected && <div className={styles.notice}>Weather Company feed verified{data.twsLastVerifiedAt ? ` at ${new Date(data.twsLastVerifiedAt).toLocaleTimeString()}` : ""}. Provider data is cached server-side for {Math.round((data.twsCacheSeconds ?? 600) / 60)} minutes, so fast dashboard polling does not repeatedly consume API calls.</div>}
+      {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>The Weather Company key is configured, but the latest provider fetch did not succeed. The existing trajectory stays isolated from that failure.</div>}
+      {data && data.forecastConfigured === false && <div className={styles.notice}>The Weather Company trajectory is coded but no API key is configured on this deployment, so the trajectory panel will stay hidden until a server-side key is added.</div>}
       <div className={styles.notice}>HF-ASOS temperatures are transmitted in whole °C and remain a coarse decimal conversion. Official METAR and 6-hour values use the raw tenths-°C group first, then floor the Fahrenheit result; the hourly chart uses those same floored values. TWC forecast snapshots are archived in 15-minute buckets for walk-forward trajectory research.</div>
       <main className={styles.cards}>{visible.map((station) => <StationCard station={station} key={station.stid} />)}{!visible.length && !loading && !error && <div className={styles.empty}>No station data returned.</div>}</main>
     </div>
