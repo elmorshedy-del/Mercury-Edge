@@ -62,6 +62,9 @@ type DashboardData = {
   stations: Station[];
   forecastSource?: string;
   forecastConfigured?: boolean;
+  twsConfigured?: boolean;
+  twsConnected?: boolean;
+  twsStatus?: "connected" | "disconnected" | "not-wired" | "not-configured";
   trajectoryModel?: string;
 };
 
@@ -596,7 +599,17 @@ export function WeatherDashboardClient() {
         {data?.stations.map((station) => <button key={station.stid} className={!all && selected === station.stid ? styles.activeTab : ""} onClick={() => { setSelected(station.stid); setAll(false); }}><b>{station.city}</b><small>{station.stid}</small></button>)}
         <button className={all ? styles.activeTab : ""} onClick={() => setAll(true)}><b>All</b><small>scroll</small></button>
       </nav>
-      <div className={styles.statusLine}><span className={error ? styles.badDot : styles.goodDot} />{error ? error : data ? `${rapid ? "Rapid 2s official-report polling" : "Live"} · TWC trajectory · refreshed ${new Date(data.updatedAt).toLocaleTimeString()}` : "Connecting to weather feeds…"}</div>
+      <div className={styles.statusLine}>
+        <span className={error ? styles.badDot : styles.goodDot} />
+        <span>{error ? error : data ? `${rapid ? "Rapid 2s official-report polling" : "Live"} · TWC trajectory · refreshed ${new Date(data.updatedAt).toLocaleTimeString()}` : "Connecting to weather feeds…"}</span>
+        {data && (
+          <span className={`${styles.sourceStatus} ${data.twsConnected ? styles.sourceStatusGood : styles.sourceStatusBad}`}>
+            <span className={data.twsConnected ? styles.goodDot : styles.badDot} />
+            TWS API: {data.twsConnected ? "connected" : data.twsConfigured ? "not connected" : "not configured"}
+          </span>
+        )}
+      </div>
+      {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>TWS_API_KEY is present in Railway, but this deployed build is not making a TWS request yet, so TWS data is not being read or displayed.</div>}
       {data && data.forecastConfigured === false && <div className={styles.notice}>TWC trajectory is coded but TWC_API_KEY is not configured on this deployment, so the trajectory panel will stay hidden until that server-side key is added.</div>}
       <div className={styles.notice}>HF-ASOS temperatures are transmitted in whole °C and remain a coarse decimal conversion. Official METAR and 6-hour values use the raw tenths-°C group first, then floor the Fahrenheit result; the hourly chart uses those same floored values. TWC forecast snapshots are archived in 15-minute buckets for walk-forward trajectory research.</div>
       <main className={styles.cards}>{visible.map((station) => <StationCard station={station} key={station.stid} />)}{!visible.length && !loading && !error && <div className={styles.empty}>No station data returned.</div>}</main>
