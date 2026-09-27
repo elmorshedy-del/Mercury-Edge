@@ -33,7 +33,7 @@ type ForecastPoint = {
 };
 
 type ForecastBaseline = {
-  source: "twc";
+  source: "twc" | "nws";
   localDate: string;
   issuedAt: string | null;
   capturedAt: string;
@@ -64,8 +64,14 @@ type DashboardData = {
   forecastConfigured?: boolean;
   twsConfigured?: boolean;
   twsConnected?: boolean;
-  twsStatus?: "connected" | "disconnected" | "not-wired" | "not-configured";
+  twsStatus?: "connected" | "disconnected" | "not-configured";
+  twsLastVerifiedAt?: string | null;
+  twsCacheSeconds?: number;
   trajectoryModel?: string;
+};
+
+type NwsForecastPayload = {
+  forecasts: Array<{ stid: string; baseline: ForecastBaseline }>;
 };
 
 type LocalPoint = { minute: number; temp: number };
@@ -261,7 +267,7 @@ function windVectorError(row: WeatherRow, forecast: ForecastPoint | null) {
   return Math.hypot(observed.u - predicted.u, observed.v - predicted.v);
 }
 
-function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoint[]): Mechanism {
+function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoint[], sourceLabel: string): Mechanism {
   if (!residuals.length) return { key: "baseline", label: "No divergence yet", detail: "Waiting for an overlapping routine observation.", evidence: [] };
   const latest = residuals[residuals.length - 1];
   const forecast = latest.forecast;
@@ -290,8 +296,8 @@ function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoin
     }
   }
 
-  if (dewError !== null) evidence.push(`dew point ${dewError >= 0 ? "+" : ""}${dewError.toFixed(1)}°F vs TWC`);
-  if (cloudError !== null) evidence.push(`cloud ${cloudError >= 0 ? "+" : ""}${Math.round(cloudError * 100)} pts vs TWC`);
+  if (dewError !== null) evidence.push(`dew point ${dewError >= 0 ? "+" : ""}${dewError.toFixed(1)}°F vs ${sourceLabel}`);
+  if (cloudError !== null) evidence.push(`cloud ${cloudError >= 0 ? "+" : ""}${Math.round(cloudError * 100)} pts vs ${sourceLabel}`);
   if (windError !== null) evidence.push(`wind-vector miss ${windError.toFixed(1)} mph`);
   if (heatingRateError !== null) evidence.push(`heating-rate miss ${heatingRateError >= 0 ? "+" : ""}${heatingRateError.toFixed(1)}°F/h`);
   if (precipObserved) evidence.push("precipitation/convection observed");
@@ -315,22 +321,22 @@ function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoin
   }
   if (scores[0].key === "radiation") {
     const detail = cloudError !== null && cloudError > 0.12
-      ? "Cloudier than TWC during usable daylight: short-wave heating runway is being suppressed."
+      ? `Cloudier than ${sourceLabel} during usable daylight: short-wave heating runway is being suppressed.`
       : cloudError !== null && cloudError < -0.12
-        ? "Clearer than TWC during usable daylight: more solar heating runway remains than the baseline expected."
-        : "The observed heating rate is diverging from TWC during daylight; cloud/radiation is the leading diagnostic.";
+        ? `Clearer than ${sourceLabel} during usable daylight: more solar heating runway remains than the baseline expected.`
+        : `The observed heating rate is diverging from ${sourceLabel} during daylight; cloud/radiation is the leading diagnostic.`;
     return { key: "radiation", label: "Cloud / solar divergence", detail, evidence };
   }
   if (scores[0].key === "moisture") {
     return {
       key: "moisture",
       label: "Moisture divergence",
-      detail: dewError !== null && dewError > 0 ? "Boundary layer is moister than TWC. Treat the heating path as constrained until the moisture mismatch closes." : "Boundary layer is drier than TWC. Sensible heating may run differently from the original curve.",
+      detail: dewError !== null && dewError > 0 ? `Boundary layer is moister than ${sourceLabel}. Treat the heating path as constrained until the moisture mismatch closes.` : `Boundary layer is drier than ${sourceLabel}. Sensible heating may run differently from the original curve.`,
       evidence,
     };
   }
   if (scores[0].key === "advection") {
-    return { key: "advection", label: "Wind / advection divergence", detail: "The wind field differs materially from TWC. Local temperature bias can reset quickly if the wind direction or air mass changes.", evidence };
+    return { key: "advection", label: "Wind / advection divergence", detail: `The wind field differs materially from ${sourceLabel}. Local temperature bias can reset quickly if the wind direction or air mass changes.`, evidence };
   }
   return { key: "precip", label: "Precipitation regime break", detail: "Rain/convection arrived differently than forecast. Do not carry the pre-event temperature slope through the transition.", evidence };
 }
@@ -378,7 +384,7 @@ function buildTrajectory(station: Station) {
   const actualPeak = precisePoints.length ? precisePoints.reduce((best, point) => (point.temp > best.temp ? point : best), precisePoints[0]) : null;
   const sixHourRows = station.sixHour.filter((row) => row.high6 !== null && localDateLabel(row.time, station.timezone) === baseline.localDate);
   const sixHourPeak = sixHourRows.length ? sixHourRows.reduce((best, row) => ((row.high6 as number) > (best.high6 as number) ? row : best), sixHourRows[0]) : null;
-  const mechanism = diagnoseMechanism(residuals, baselinePoints);
+  const mechanism = diagnoseMechanism(residuals, baselinePoints, baseline.source === "twc" ? "TWC" : "NWS");
 
   if (!residuals.length) {
     return {
@@ -425,6 +431,9 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
   const model = useMemo(() => buildTrajectory(station), [station]);
   if (!model || !station.forecastBaseline) return null;
 
+  const sourceShort = station.forecastBaseline.source === "twc" ? "TWC" : "NWS";
+  const sourceLong = station.forecastBaseline.source === "twc" ? "The Weather Company" : "National Weather Service";
+
   const daytimeBaseline = model.baselinePoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
   if (daytimeBaseline.length < 2) return null;
   const plottedObserved = model.observedPoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
@@ -452,20 +461,20 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       <div className={styles.sectionTitle}>
         <div>
           <span>Daily trajectory</span>
-          <h3>TWC forecast vs floored hourly METAR</h3>
+          <h3>{sourceShort} forecast vs floored hourly METAR</h3>
         </div>
-        <small>TWC pre-day baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
+        <small>{sourceShort} baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
       </div>
 
       <div className={styles.trajectoryStats}>
-        <div><span>TWC calendar-day high</span><b>{station.forecastBaseline.forecastHigh !== null ? `${station.forecastBaseline.forecastHigh.toFixed(0)}°F` : model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° hourly peak` : "—"}</b></div>
+        <div><span>{sourceShort} calendar-day high</span><b>{station.forecastBaseline.forecastHigh !== null ? `${station.forecastBaseline.forecastHigh.toFixed(0)}°F` : model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° hourly peak` : "—"}</b></div>
         <div><span>Floored METAR max</span><b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b></div>
         <div><span>6h max revealed</span><b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(0)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b></div>
         <div><span>Adaptive hourly max</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
       </div>
 
       <div className={styles.trajectoryLegend}>
-        <span><i className={styles.legendOriginal} />Original TWC hourly path</span>
+        <span><i className={styles.legendOriginal} />Original {sourceShort} hourly path</span>
         <span><i className={styles.legendObserved} />Hourly METAR (floor °F)</span>
         <span><i className={styles.legendAdaptive} />Kalman adaptive future</span>
         {model.latestResidual !== null && <span>Latest miss {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
@@ -473,7 +482,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} TWC hourly forecast, floored hourly METAR observations, and adaptive future trajectory`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} ${sourceShort} hourly forecast, floored hourly METAR observations, and adaptive future trajectory`}>
           {[yMin, middleTick, yMax].map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -490,7 +499,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} The blue path is TWC hourly shape; the high card uses TWC calendarDayTemperatureMax because the market is a midnight-to-midnight calendar-day maximum. TWC itself warns that its final daily high should not be derived from the hourly series. The adaptive line numerically applies only the sequential Kalman bias state with observed residual persistence. Cloud, dew-point, wind/advection and precipitation remain diagnostic until expanding-window historical validation shows out-of-sample value.
+        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} The blue path is the {sourceLong} hourly shape. The high card uses the provider's daily-high field when available; the adaptive line numerically applies only the sequential Kalman bias state with observed temperature-residual persistence.
       </p>
     </section>
   );
@@ -562,9 +571,22 @@ export function WeatherDashboardClient() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(`/api/weather-dashboard?ts=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } });
-      const next = await response.json();
+      const [response, nwsResponse] = await Promise.all([
+        fetch(`/api/weather-dashboard?ts=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } }),
+        fetch(`/api/weather-dashboard/nws-forecast?ts=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } }),
+      ]);
+      const next = await response.json() as DashboardData & { error?: string };
+      const nws = await nwsResponse.json() as NwsForecastPayload & { error?: string };
       if (!response.ok) throw new Error(next.error ?? "Weather request failed");
+
+      if (nwsResponse.ok && Array.isArray(nws.forecasts)) {
+        const nwsByStid = new Map(nws.forecasts.map((item) => [item.stid, item.baseline]));
+        next.stations = next.stations.map((station) => ({
+          ...station,
+          forecastBaseline: station.forecastBaseline ?? nwsByStid.get(station.stid) ?? null,
+        }));
+      }
+
       setData(next);
       setError(null);
     } catch (err) {
@@ -605,12 +627,13 @@ export function WeatherDashboardClient() {
         {data && (
           <span className={`${styles.sourceStatus} ${data.twsConnected ? styles.sourceStatusGood : styles.sourceStatusBad}`}>
             <span className={data.twsConnected ? styles.goodDot : styles.badDot} />
-            TWS API: {data.twsConnected ? "connected" : data.twsConfigured ? "not connected" : "not configured"}
+            Weather Company: {data.twsConnected ? "connected" : data.twsConfigured ? "not connected" : "not configured"}
           </span>
         )}
       </div>
-      {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>TWS_API_KEY is present in Railway, but this deployed build is not making a TWS request yet, so TWS data is not being read or displayed.</div>}
-      {data && data.forecastConfigured === false && <div className={styles.notice}>TWC trajectory is coded but TWC_API_KEY is not configured on this deployment, so the trajectory panel will stay hidden until that server-side key is added.</div>}
+      {data?.twsConnected && <div className={styles.notice}>Weather Company feed verified{data.twsLastVerifiedAt ? ` at ${new Date(data.twsLastVerifiedAt).toLocaleTimeString()}` : ""}. Provider data is cached server-side for {Math.round((data.twsCacheSeconds ?? 600) / 60)} minutes, so fast dashboard polling does not repeatedly consume API calls.</div>}
+      {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>The Weather Company key is configured, but the latest provider fetch did not succeed. The existing trajectory stays isolated from that failure.</div>}
+      {data && data.forecastConfigured === false && <div className={styles.notice}>The Weather Company trajectory is coded but no API key is configured on this deployment, so the trajectory panel will stay hidden until a server-side key is added.</div>}
       <div className={styles.notice}>HF-ASOS temperatures are transmitted in whole °C and remain a coarse decimal conversion. Official METAR and 6-hour values use the raw tenths-°C group first, then floor the Fahrenheit result; the hourly chart uses those same floored values. TWC forecast snapshots are archived in 15-minute buckets for walk-forward trajectory research.</div>
       <main className={styles.cards}>{visible.map((station) => <StationCard station={station} key={station.stid} />)}{!visible.length && !loading && !error && <div className={styles.empty}>No station data returned.</div>}</main>
     </div>
