@@ -47,6 +47,7 @@ type Row = {
   low24: number | null;
   raw: string | null;
   kind: "hf" | "official" | "other";
+  reportType: "METAR" | "SPECI" | "HF" | "OTHER";
   source?: "synoptic" | "awc";
   receivedAt?: string | null;
 };
@@ -213,6 +214,15 @@ function classify(raw: string | null): Row["kind"] {
   return "official";
 }
 
+function reportTypeFromRaw(raw: string | null, kind: Row["kind"], providerType: string | null = null): Row["reportType"] {
+  const hint = providerType?.toUpperCase() ?? "";
+  if (hint.includes("SPECI") || raw?.startsWith("SPECI ")) return "SPECI";
+  if (kind === "hf") return "HF";
+  if (hint.includes("METAR") || raw?.startsWith("METAR ")) return "METAR";
+  if (kind === "official") return "METAR";
+  return "OTHER";
+}
+
 function normalizeStation(station: AnyRecord) {
   const obs = (station.OBSERVATIONS ?? {}) as AnyRecord;
   const dates = Array.isArray(obs.date_time) ? (obs.date_time as unknown[]) : [];
@@ -254,6 +264,7 @@ function normalizeStation(station: AnyRecord) {
       low24: floorF(num(valueAt(obs, keys.low24, index))),
       raw,
       kind,
+      reportType: reportTypeFromRaw(raw, kind),
       source: "synoptic",
       receivedAt: null,
     };
@@ -271,6 +282,7 @@ function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
   const stid = str(item.icaoId);
   if (!stid) return null;
   const raw = str(item.rawOb);
+  const providerType = str(item.metarType);
   const tempC = num(item.temp);
   const dewC = num(item.dewp);
   const obsTime = num(item.obsTime);
@@ -298,6 +310,7 @@ function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
       low24: null,
       raw,
       kind: "official",
+      reportType: reportTypeFromRaw(raw, "official", providerType),
       source: "awc",
       receivedAt: str(item.receiptTime),
     },
