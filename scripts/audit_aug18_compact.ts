@@ -32,17 +32,17 @@ async function main(){
        ('endday', (($2::date + 1)::timestamp) AT TIME ZONE $3)
      )
      SELECT c.label,
-       twc.captured_at twc_at, NULLIF(twc.daily_highs->>$2,'')::float8 twc_high,
-       nws.captured_at nws_at, NULLIF(nws.daily_highs->>$2,'')::float8 nws_high
+       twc.captured_at twc_at, NULLIF(twc.daily_highs->>($2::text),'')::float8 twc_high,
+       nws.captured_at nws_at, NULLIF(nws.daily_highs->>($2::text),'')::float8 nws_high
      FROM cuts c
      LEFT JOIN LATERAL (
        SELECT captured_at,daily_highs FROM weather_forecast_snapshots
-       WHERE stid=$1 AND source='twc' AND captured_at < c.cut_at AND daily_highs ? $2
+       WHERE stid=$1 AND source='twc' AND captured_at < c.cut_at AND daily_highs ? ($2::text)
        ORDER BY captured_at DESC LIMIT 1
      ) twc ON true
      LEFT JOIN LATERAL (
        SELECT captured_at,daily_highs FROM weather_forecast_snapshots
-       WHERE stid=$1 AND source='nws' AND captured_at < c.cut_at AND daily_highs ? $2
+       WHERE stid=$1 AND source='nws' AND captured_at < c.cut_at AND daily_highs ? ($2::text)
        ORDER BY captured_at DESC LIMIT 1
      ) nws ON true
      ORDER BY CASE c.label WHEN 'preday' THEN 0 WHEN '09local' THEN 1 WHEN '12local' THEN 2 WHEN '14local' THEN 3 WHEN '18local' THEN 4 ELSE 5 END
