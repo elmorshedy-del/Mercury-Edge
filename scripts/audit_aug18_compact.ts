@@ -1,97 +1,92 @@
 import { pool } from "../lib/db";
 
-async function main() {
-  if (!pool) throw new Error("DATABASE_URL required");
+const targets = [
+  {stid:"KNYC", tz:"America/New_York", series:"KXHIGHNY"},
+  {stid:"KPHL", tz:"America/New_York", series:"KXHIGHPHIL"},
+  {stid:"KLAX", tz:"America/Los_Angeles", series:"KXHIGHLAX"},
+  {stid:"KDEN", tz:"America/Denver", series:"KXHIGHDEN"},
+  {stid:"KSEA", tz:"America/Los_Angeles", series:"KXHIGHTSEA"},
+];
+const dates=["2026-09-27","2026-09-28"];
 
-  const coverage = await pool.query(`
-    SELECT source, stid, count(*)::int AS n,
-           min(captured_at) AS first_capture, max(captured_at) AS last_capture
-    FROM weather_forecast_snapshots
-    GROUP BY source, stid
-    ORDER BY stid, source
-  `);
-
-  const events = await pool.query(`
-    SELECT station_code, count(*)::int AS n,
-           min(trade_date) AS first_date, max(trade_date) AS last_date,
-           count(*) FILTER (WHERE final_value_f IS NOT NULL)::int AS settled
-    FROM market_events
-    WHERE station_code IN ('KNYC','KPHL','KLAX','KDEN','KSEA')
-    GROUP BY station_code
-    ORDER BY station_code
-  `);
-
-  const observations = await pool.query(`
-    SELECT station_code, source, count(*)::int AS n,
-           min(observed_at) AS first_obs, max(observed_at) AS last_obs
-    FROM weather_observations
-    WHERE station_code IN ('KNYC','KPHL','KLAX','KDEN','KSEA')
-    GROUP BY station_code, source
-    ORDER BY station_code, source
-  `);
-
-  const study = await pool.query(`
-    WITH cfg(stid,tz) AS (
-      VALUES
-        ('KNYC','America/New_York'),
-        ('KPHL','America/New_York'),
-        ('KLAX','America/Los_Angeles'),
-        ('KDEN','America/Denver'),
-        ('KSEA','America/Los_Angeles')
-    ),
-    settled AS (
-      SELECT e.event_ticker,e.station_code,e.trade_date,e.final_value_f,cfg.tz
-      FROM market_events e
-      JOIN cfg ON cfg.stid=e.station_code
-      WHERE e.final_value_f IS NOT NULL
-        AND e.trade_date >= DATE '2026-08-28'
-    )
-    SELECT e.station_code AS stid, e.trade_date, e.event_ticker,
-           e.final_value_f::float8 AS final_high_f,
-           win.ticker AS winning_ticker, win.label AS winning_label,
-           win.lower_bound_f::float8 AS win_low_f, win.upper_bound_f::float8 AS win_high_f,
-           twc.captured_at AS twc_captured_at,
-           NULLIF(twc.daily_highs ->> e.trade_date::text,'')::float8 AS twc_high_f,
-           nws.captured_at AS nws_captured_at,
-           NULLIF(nws.daily_highs ->> e.trade_date::text,'')::float8 AS nws_high_f
-    FROM settled e
-    LEFT JOIN LATERAL (
-      SELECT mc.ticker, mc.label, mc.lower_bound_f, mc.upper_bound_f
-      FROM market_contracts mc
-      WHERE mc.event_ticker=e.event_ticker AND mc.result='yes'
-      ORDER BY mc.ticker
-      LIMIT 1
-    ) win ON true
-    LEFT JOIN LATERAL (
-      SELECT s.captured_at,s.daily_highs
-      FROM weather_forecast_snapshots s
-      WHERE s.stid=e.station_code AND s.source='twc'
-        AND s.captured_at < (e.trade_date::timestamp AT TIME ZONE e.tz)
-        AND s.daily_highs ? e.trade_date::text
-      ORDER BY s.captured_at DESC
-      LIMIT 1
-    ) twc ON true
-    LEFT JOIN LATERAL (
-      SELECT s.captured_at,s.daily_highs
-      FROM weather_forecast_snapshots s
-      WHERE s.stid=e.station_code AND s.source='nws'
-        AND s.captured_at < (e.trade_date::timestamp AT TIME ZONE e.tz)
-        AND s.daily_highs ? e.trade_date::text
-      ORDER BY s.captured_at DESC
-      LIMIT 1
-    ) nws ON true
-    ORDER BY e.trade_date,e.station_code
-  `);
-
-  console.log("FORECAST_COVERAGE=" + JSON.stringify(coverage.rows));
-  console.log("EVENT_COVERAGE=" + JSON.stringify(events.rows));
-  console.log("OBS_COVERAGE=" + JSON.stringify(observations.rows));
-  console.log("STUDY_ROWS=" + JSON.stringify(study.rows));
-  await pool.end();
+function evt(series:string,date:string){
+  const d=new Date(date+"T00:00:00Z");
+  const mon=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"][d.getUTCMonth()];
+  return `${series}-${String(d.getUTCFullYear()).slice(2)}${mon}${String(d.getUTCDate()).padStart(2,"0")}`;
 }
+function n(v:any){const x=Number(v);return v==null||!Number.isFinite(x)?null:x}
 
-main().catch(async (e) => {
-  console.error("FORECAST_STUDY_FAILED", e);
-  await pool?.end().catch(() => undefined);
-  process.exit(1);
-});
+async function main(){
+ if(!pool) throw new Error("DATABASE_URL required");
+ const matrix:any[]=[];
+ for(const t of targets){
+  for(const date of dates){
+   const q=await pool.query(`
+     WITH cuts(label,cut_at) AS (
+       VALUES
+       ('preday', $2::date::timestamp AT TIME ZONE $3),
+       ('09local', ($2::date + time '09:00') AT TIME ZONE $3),
+       ('12local', ($2::date + time '12:00') AT TIME ZONE $3),
+       ('14local', ($2::date + time '14:00') AT TIME ZONE $3),
+       ('18local', ($2::date + time '18:00') AT TIME ZONE $3),
+       ('endday', (($2::date + 1)::timestamp) AT TIME ZONE $3)
+     )
+     SELECT c.label,
+       twc.captured_at twc_at, NULLIF(twc.daily_highs->>$2,'')::float8 twc_high,
+       nws.captured_at nws_at, NULLIF(nws.daily_highs->>$2,'')::float8 nws_high
+     FROM cuts c
+     LEFT JOIN LATERAL (
+       SELECT captured_at,daily_highs FROM weather_forecast_snapshots
+       WHERE stid=$1 AND source='twc' AND captured_at < c.cut_at AND daily_highs ? $2
+       ORDER BY captured_at DESC LIMIT 1
+     ) twc ON true
+     LEFT JOIN LATERAL (
+       SELECT captured_at,daily_highs FROM weather_forecast_snapshots
+       WHERE stid=$1 AND source='nws' AND captured_at < c.cut_at AND daily_highs ? $2
+       ORDER BY captured_at DESC LIMIT 1
+     ) nws ON true
+     ORDER BY CASE c.label WHEN 'preday' THEN 0 WHEN '09local' THEN 1 WHEN '12local' THEN 2 WHEN '14local' THEN 3 WHEN '18local' THEN 4 ELSE 5 END
+   `,[t.stid,date,t.tz]);
+   matrix.push({stid:t.stid,date,cuts:q.rows});
+  }
+ }
+
+ const kalshi:any[]=[];
+ for(const t of targets){
+   for(const date of dates){
+     const eventTicker=evt(t.series,date);
+     const urls=[
+       `https://api.elections.kalshi.com/trade-api/v2/events/${eventTicker}?with_nested_markets=true`,
+       `https://external-api.kalshi.com/trade-api/v2/events/${eventTicker}?with_nested_markets=true`
+     ];
+     let payload:any=null, used:string|null=null, error:string|null=null;
+     for(const url of urls){
+       try{const r=await fetch(url,{headers:{"User-Agent":"MercuryEdge forecast research"}});if(r.ok){payload=await r.json();used=url;break}else error=`${r.status} ${await r.text()}`;}catch(e){error=String(e)}
+     }
+     const markets=payload?.markets ?? payload?.event?.markets ?? [];
+     const winners=(Array.isArray(markets)?markets:[]).filter((m:any)=>String(m.result||"").toLowerCase()==="yes").map((m:any)=>({
+       ticker:m.ticker,title:m.title,subtitle:m.subtitle,yes_sub_title:m.yes_sub_title,
+       floor_strike:n(m.floor_strike),cap_strike:n(m.cap_strike),result:m.result,status:m.status
+     }));
+     kalshi.push({stid:t.stid,date,eventTicker,used,error,winners,marketCount:Array.isArray(markets)?markets.length:null,eventStatus:payload?.event?.status??null});
+   }
+ }
+
+ const awcUrl=new URL("https://aviationweather.gov/api/data/metar");
+ awcUrl.searchParams.set("ids",targets.map(t=>t.stid).join(","));
+ awcUrl.searchParams.set("format","json");
+ awcUrl.searchParams.set("hours","60");
+ let awc:any[]=[];
+ try{const r=await fetch(awcUrl,{headers:{"User-Agent":"MercuryEdge forecast research"}}); if(r.ok) awc=await r.json(); else console.error("AWC_HTTP",r.status,await r.text());}catch(e){console.error("AWC_FETCH",e)}
+ const wx=awc.filter((x:any)=> {
+   const tm=n(x.obsTime); if(tm==null)return false;
+   const iso=new Date(tm*1000).toISOString();
+   return iso>="2026-09-27T00:00:00.000Z"&&iso<"2026-09-29T12:00:00.000Z";
+ }).map((x:any)=>({stid:x.icaoId,obsTime:x.obsTime,tempC:n(x.temp),dewC:n(x.dewp),wdir:n(x.wdir),wspdKt:n(x.wspd),raw:x.rawOb,clouds:x.clouds??null,wx:x.wxString??null}));
+
+ console.log("FORECAST_MATRIX="+JSON.stringify(matrix));
+ console.log("KALSHI_RESULTS="+JSON.stringify(kalshi));
+ console.log("AWC_ROWS="+JSON.stringify(wx));
+ await pool.end();
+}
+main().catch(async e=>{console.error("FORECAST_STUDY_FAILED",e);await pool?.end().catch(()=>undefined);process.exit(1)});
