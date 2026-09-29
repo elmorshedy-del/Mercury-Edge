@@ -9,8 +9,8 @@ from typing import Any
 
 import psycopg
 
-import paper_engine as dbn
-from strategy_runtime import execute_extra_strategies
+import paper_engine_hardened as dbn
+from strategy_runtime_hardened import execute_extra_strategies
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_ID = os.environ["PAPER_SESSION_ID"]
@@ -64,6 +64,8 @@ def main() -> int:
         "event": "unified_paper_engine_start",
         "session_id": SESSION_ID,
         "engines": ["DBN", "DSN", "SBK", "HSR", "WTY", "RMO", "PRV", "LVP", "HMF"],
+        "benchmark_gate": "approved_only",
+        "shadow_lab": True,
         "real_money": False,
     }))
 
@@ -118,8 +120,9 @@ def main() -> int:
                         global_cfg = dbn.load_global(conn)
                         fresh, stale_reason = weather_is_fresh_for_live_trade(weather, global_cfg)
                         if fresh:
-                            # Proven DBN gets first claim; research strategies use
-                            # the remaining per-mode/event/region/day capacity.
+                            # Benchmark DBN gets first claim only when approved;
+                            # research strategies are evaluated independently in
+                            # the counterfactual lab unless explicitly promoted.
                             dbn_count = dbn.process_weather(conn, weather)
                             modes = dbn.load_modes(conn)
                             extra_count = execute_extra_strategies(

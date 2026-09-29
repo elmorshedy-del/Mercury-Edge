@@ -13,6 +13,8 @@ from typing import Any
 
 import psycopg
 
+from raw_journal import RawCapture, insert_raw_capture
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 SESSION_ID = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4()}")
 MODEL_VERSION = os.getenv("PAPER_MODEL_VERSION", "paper-v1.1")
@@ -35,12 +37,23 @@ def iso_from_epoch_seconds(seconds: int | float) -> str:
     return datetime.fromtimestamp(float(seconds), tz=timezone.utc).isoformat()
 
 
-def http_json(url: str) -> list[dict[str, Any]]:
+def http_json_capture(url: str) -> tuple[list[dict[str, Any]], bytes, dict[str, Any]]:
+    """Return parsed JSON plus the exact HTTP entity bytes used to parse it."""
     req = urllib.request.Request(url, headers={"User-Agent": "MercuryEdge-Paper/1.1"})
     with urllib.request.urlopen(req, timeout=15) as response:
-        if response.status == 204:
-            return []
-        return json.loads(response.read())
+        raw_bytes = response.read()
+        metadata = {
+            "status": int(response.status),
+            "content_type": response.headers.get("Content-Type"),
+            "content_encoding": response.headers.get("Content-Encoding"),
+            "date": response.headers.get("Date"),
+        }
+        if response.status == 204 or not raw_bytes:
+            return [], raw_bytes, metadata
+        decoded = json.loads(raw_bytes)
+        if not isinstance(decoded, list):
+            raise ValueError("AWC METAR response is not a JSON list")
+        return decoded, raw_bytes, metadata
 
 
 def ensure_session(conn: psycopg.Connection[Any]) -> None:
@@ -64,12 +77,45 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
     url = f"{AWC_URL}?{params}"
     request_started_ns = time.time_ns()
     request_started_mono_ns = time.monotonic_ns()
-    reports = http_json(url)
+    reports, raw_response_bytes, response_metadata = http_json_capture(url)
     response_completed_ns = time.time_ns()
     response_completed_mono_ns = time.monotonic_ns()
     request_rtt_ns = response_completed_mono_ns - request_started_mono_ns
-    written = 0
+    received_at = datetime.fromtimestamp(response_completed_ns / 1_000_000_000, tz=timezone.utc)
 
+    # Preserve the source body before any report-level normalization. Every
+    # parsed live_weather_journal row below points back to this immutable batch.
+    raw_source_id = insert_raw_capture(
+        conn,
+        RawCapture(
+            session_id=SESSION_ID,
+            source="NOAA_AWC",
+            source_stream="metar_json_batch",
+            raw_bytes=raw_response_bytes,
+            received_at=received_at,
+            received_epoch_ns=response_completed_ns,
+            received_monotonic_ns=response_completed_mono_ns,
+            transport="https_poll",
+            content_type=str(response_metadata.get("content_type") or "application/json"),
+            content_encoding=(
+                str(response_metadata["content_encoding"])
+                if response_metadata.get("content_encoding")
+                else None
+            ),
+            metadata={
+                "collector": "awc-live-v1.1",
+                "request_started_epoch_ns": str(request_started_ns),
+                "request_started_monotonic_ns": str(request_started_mono_ns),
+                "request_rtt_ns": str(request_rtt_ns),
+                "http": response_metadata,
+                "requested_stations": STATIONS,
+                "hours": 2,
+                "format": "json",
+            },
+        ),
+    )
+
+    written = 0
     for report in reports:
         station = report.get("icaoId")
         obs_time = report.get("obsTime")
@@ -84,6 +130,7 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
         stored_payload = {
             "report": report,
             "capture": {
+                "raw_source_id": raw_source_id,
                 "request_started_epoch_ns": str(request_started_ns),
                 "response_completed_epoch_ns": str(response_completed_ns),
                 "request_rtt_ns": str(request_rtt_ns),
@@ -97,9 +144,9 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
               observed_at, source_received_at, first_seen_at,
               received_epoch_ms, received_epoch_ns, received_monotonic_ns,
               temperature_f, max_temperature_f, raw_text, raw_payload,
-              payload_sha256, compatibility_status, compatibility_rule
+              payload_sha256, compatibility_status, compatibility_rule,raw_source_id
             ) VALUES (
-              %s,%s,'NOAA_AWC',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,'unverified',NULL
+              %s,%s,'NOAA_AWC',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,'unverified',NULL,%s
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -110,7 +157,7 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
                 str(report.get("metarType") or "METAR"),
                 iso_from_epoch_seconds(obs_time),
                 str(source_receipt) if source_receipt else None,
-                utc_iso_from_ns(response_completed_ns),
+                received_at.isoformat(),
                 response_completed_ns // 1_000_000,
                 str(response_completed_ns),
                 str(response_completed_mono_ns),
@@ -119,6 +166,7 @@ def collect_once(conn: psycopg.Connection[Any]) -> int:
                 str(raw),
                 json.dumps(stored_payload, separators=(",", ":")),
                 payload_sha,
+                raw_source_id,
             ),
         ).fetchone()
         if row:
