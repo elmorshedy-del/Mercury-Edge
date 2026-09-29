@@ -1,73 +1,28 @@
 import { pool } from "../lib/db";
+import { localDate } from "../lib/time";
 
-const targets=[
- {stid:"KNYC",tz:"America/New_York",series:"KXHIGHNY"},
- {stid:"KPHL",tz:"America/New_York",series:"KXHIGHPHIL"},
- {stid:"KLAX",tz:"America/Los_Angeles",series:"KXHIGHLAX"},
- {stid:"KDEN",tz:"America/Denver",series:"KXHIGHDEN"},
- {stid:"KSEA",tz:"America/Los_Angeles",series:"KXHIGHTSEA"},
-];
-const dates=["2026-09-27","2026-09-28"];
-const mon=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-const eventTicker=(series:string,date:string)=>{const d=new Date(date+"T00:00:00Z");return `${series}-${String(d.getUTCFullYear()).slice(2)}${mon[d.getUTCMonth()]}${String(d.getUTCDate()).padStart(2,"0")}`};
-const num=(v:any)=>{const x=Number(v);return v==null||!Number.isFinite(x)?null:x};
-const localDate=(epochSec:number,tz:string)=>new Intl.DateTimeFormat("en-CA",{timeZone:tz,year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(epochSec*1000));
+const MONTHS: Record<string,string>={JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12'};
+function eventDate(t:string|null){if(!t)return null;const m=t.match(/-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(?:$|-)/i);return m?`20${m[1]}-${MONTHS[m[2].toUpperCase()]}-${m[3]}`:null}
+function n(v:unknown){const x=Number(v);return v==null||v===''||!Number.isFinite(x)?null:x}
 
 async function main(){
- if(!pool)throw new Error("DATABASE_URL required");
- const matrix:any[]=[];
- for(const t of targets)for(const date of dates){
-  const q=await pool.query(`
-   WITH cuts(label,cut_at) AS (VALUES
-    ('preday',$2::date::timestamp AT TIME ZONE $3),
-    ('12local',($2::date+time '12:00') AT TIME ZONE $3),
-    ('14local',($2::date+time '14:00') AT TIME ZONE $3),
-    ('18local',($2::date+time '18:00') AT TIME ZONE $3),
-    ('endday',(($2::date+1)::timestamp) AT TIME ZONE $3))
-   SELECT c.label,
-    twc.captured_at twc_at,NULLIF(twc.daily_highs->>($2::text),'')::float8 twc_high,
-    nws.captured_at nws_at,NULLIF(nws.daily_highs->>($2::text),'')::float8 nws_high
-   FROM cuts c
-   LEFT JOIN LATERAL(SELECT captured_at,daily_highs FROM weather_forecast_snapshots WHERE stid=$1 AND source='twc' AND captured_at<c.cut_at AND daily_highs?($2::text) ORDER BY captured_at DESC LIMIT 1)twc ON true
-   LEFT JOIN LATERAL(SELECT captured_at,daily_highs FROM weather_forecast_snapshots WHERE stid=$1 AND source='nws' AND captured_at<c.cut_at AND daily_highs?($2::text) ORDER BY captured_at DESC LIMIT 1)nws ON true
-   ORDER BY CASE c.label WHEN 'preday' THEN 0 WHEN '12local' THEN 1 WHEN '14local' THEN 2 WHEN '18local' THEN 3 ELSE 4 END
-  `,[t.stid,date,t.tz]);
-  matrix.push({stid:t.stid,date,cuts:q.rows});
- }
-
- const kalshi:any[]=[];
- for(const t of targets)for(const date of dates){
-  const ev=eventTicker(t.series,date);
-  let payload:any=null,error:any=null,used:any=null;
-  for(const base of ["https://api.elections.kalshi.com/trade-api/v2","https://external-api.kalshi.com/trade-api/v2"]){
-   try{
-    const u=new URL(base+"/markets");u.searchParams.set("event_ticker",ev);u.searchParams.set("limit","1000");
-    const r=await fetch(u,{headers:{"User-Agent":"MercuryEdge forecast research"}});
-    if(r.ok){payload=await r.json();used=u.toString();break}else error=`${r.status}:${(await r.text()).slice(0,200)}`;
-   }catch(e){error=String(e)}
-  }
-  const markets=Array.isArray(payload?.markets)?payload.markets:[];
-  const compact=markets.map((m:any)=>({ticker:m.ticker,status:m.status,result:m.result,title:m.title,subtitle:m.subtitle,yes_sub_title:m.yes_sub_title,floor_strike:num(m.floor_strike),cap_strike:num(m.cap_strike),last_price:num(m.last_price)}));
-  kalshi.push({stid:t.stid,date,eventTicker:ev,used,error,count:compact.length,winners:compact.filter((m:any)=>String(m.result).toLowerCase()==="yes"),markets:compact});
- }
-
- const u=new URL("https://aviationweather.gov/api/data/metar");
- u.searchParams.set("ids",targets.map(x=>x.stid).join(","));u.searchParams.set("format","json");u.searchParams.set("hours","60");
- let raw:any[]=[];try{const r=await fetch(u,{headers:{"User-Agent":"MercuryEdge forecast research"}});if(r.ok)raw=await r.json();else console.error("AWC_HTTP",r.status)}catch(e){console.error("AWC_FETCH",e)}
- const wxSummary:any[]=[];
- for(const t of targets)for(const date of dates){
-  const rows=raw.filter((x:any)=>x.icaoId===t.stid&&num(x.obsTime)!=null&&localDate(Number(x.obsTime),t.tz)===date);
-  const temps=rows.map((x:any)=>num(x.temp)).filter((x:any)=>x!=null) as number[];
-  const dewps=rows.map((x:any)=>num(x.dewp)).filter((x:any)=>x!=null) as number[];
-  const maxC=temps.length?Math.max(...temps):null;
-  const maxRows=maxC==null?[]:rows.filter((x:any)=>num(x.temp)===maxC);
-  const rain=rows.filter((x:any)=>/RA|DZ|TS/.test(String(x.wxString||"")+" "+String(x.rawOb||""))).length;
-  const lowCloud=rows.filter((x:any)=>Array.isArray(x.clouds)&&x.clouds.some((c:any)=>["BKN","OVC","OVX"].includes(c.cover)&&num(c.base)!=null&&Number(c.base)<=3000)).length;
-  wxSummary.push({stid:t.stid,date,n:rows.length,maxF:maxC==null?null:maxC*9/5+32,maxTimes:maxRows.map((x:any)=>new Date(Number(x.obsTime)*1000).toISOString()),meanDewF:dewps.length?(dewps.reduce((a,b)=>a+b,0)/dewps.length)*9/5+32:null,rainFrac:rows.length?rain/rows.length:null,lowCloudFrac:rows.length?lowCloud/rows.length:null});
- }
- console.log("FORECAST_MATRIX="+JSON.stringify(matrix));
- console.log("KALSHI_RESULTS="+JSON.stringify(kalshi));
- console.log("WX_SUMMARY="+JSON.stringify(wxSummary));
+ if(!pool)throw new Error('DATABASE_URL required');
+ const q=await pool.query<{
+  id:string;session_id:string;mode_code:string|null;strategy_code:string;station_code:string;event_ticker:string|null;market_ticker:string;outcome_side:string;avg_fill_price:string|null;filled_qty:string;gross_cost:string;estimated_fee:string;decision_at:Date;auditor_status:string;evidence:Record<string,unknown>;observed_at:Date|null;timezone:string|null;
+ }>(`SELECT o.id::text,p.session_id,p.mode_code,o.strategy_code,s.station_code,s.event_ticker,o.market_ticker,o.outcome_side,o.avg_fill_price::text,o.filled_qty::text,o.gross_cost::text,o.estimated_fee::text,o.decision_at,s.auditor_status,s.evidence,w.observed_at,st.timezone
+       FROM paper_orders o JOIN paper_portfolios p ON p.id=o.portfolio_id JOIN paper_sessions ps ON ps.id=o.session_id JOIN paper_signals s ON s.id=o.signal_id LEFT JOIN live_weather_journal w ON w.id=s.weather_event_id LEFT JOIN stations st ON st.station_code=s.station_code
+      WHERE ps.mode='paper_live' AND o.status IN ('filled','partial') AND o.decision_at>='2026-08-18T00:00:00Z'::timestamptz AND o.decision_at<'2026-08-19T12:00:00Z'::timestamptz ORDER BY o.id`);
+ const rows=q.rows.map(r=>{
+   const ed=eventDate(r.event_ticker); const wd=r.observed_at&&r.timezone?localDate(r.observed_at,r.timezone):null;
+   const wrong=!!(ed&&wd&&ed!==wd); const nonApproved=r.auditor_status!=='approved';
+   return {...r,eventDate:ed,weatherDate:wd,wrong,nonApproved};
+ });
+ const group=(key:'strategy_code'|'session_id'|'mode_code')=>Object.fromEntries([...new Set(rows.map(r=>String(r[key])))].sort().map(k=>{
+   const a=rows.filter(r=>String(r[key])===k);return[k,{orders:a.length,wrongDate:a.filter(r=>r.wrong).length,nonApproved:a.filter(r=>r.nonApproved).length,clean:a.filter(r=>!r.wrong&&!r.nonApproved).length}]
+ }));
+ const target=rows.filter(r=>r.market_ticker==='KXHIGHNY-26AUG19-T85').map(r=>({orderId:r.id,sessionId:r.session_id,mode:r.mode_code,strategy:r.strategy_code,station:r.station_code,event:r.event_ticker,eventDate:r.eventDate,weatherDate:r.weatherDate,side:r.outcome_side,entry:n(r.avg_fill_price),qty:n(r.filled_qty),cost:n(r.gross_cost),fee:n(r.estimated_fee),auditorStatus:r.auditor_status,confirmedHighF:n(r.evidence?.confirmed_high_f),upperBoundF:n(r.evidence?.upper_bound_f),issues:[...(r.wrong?['WRONG_EVENT_DATE']:[]),...(r.nonApproved?['NON_APPROVED_SIGNAL_EXECUTED']:[])]}));
+ const clean=rows.filter(r=>!r.wrong&&!r.nonApproved).map(r=>({orderId:r.id,sessionId:r.session_id,mode:r.mode_code,strategy:r.strategy_code,station:r.station_code,event:r.event_ticker,market:r.market_ticker,side:r.outcome_side,entry:n(r.avg_fill_price),qty:n(r.filled_qty)}));
+ console.log(JSON.stringify({total:rows.length,wrongDate:rows.filter(r=>r.wrong).length,nonApproved:rows.filter(r=>r.nonApproved).length,ordersWithEitherIssue:rows.filter(r=>r.wrong||r.nonApproved).length,cleanOrders:clean.length,byStrategy:group('strategy_code'),bySession:group('session_id'),byMode:group('mode_code'),targetKnycAug19T85:target,cleanOrdersDetail:clean},null,2));
  await pool.end();
 }
-main().catch(async e=>{console.error("FORECAST_STUDY_FAILED",e);await pool?.end().catch(()=>undefined);process.exit(1)});
+main().catch(async e=>{console.error('COMPACT_AUDIT_FAILED',e);await pool?.end().catch(()=>undefined);process.exit(1)});
