@@ -64,7 +64,7 @@ function statusFor(station: DsmStation, latest: DsmRelease | null) {
   return { label: "MAX FOUND", color: "#a9d2f2" };
 }
 
-export function DsmReleaseStrip() {
+export function DsmReleaseStrip({ selectedStid }: { selectedStid?: string; embedded?: boolean }) {
   const [data, setData] = useState<DsmData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,7 +111,7 @@ export function DsmReleaseStrip() {
         </div>
 
         <div style={{ display: "flex", gap: 9, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
-          {data?.stations.map((station) => {
+          {data?.stations.filter((station) => !selectedStid || station.stid === selectedStid).map((station) => {
             const latest = station.releases[0] ?? null;
             const status = statusFor(station, latest);
             return (
