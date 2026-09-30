@@ -578,10 +578,14 @@ function StationCard({ station }: { station: Station }) {
   );
 }
 
-export function WeatherDashboardClient() {
+export function WeatherDashboardClient({
+  selectedStid = "KNYC",
+  embedded = false,
+}: {
+  selectedStid?: string;
+  embedded?: boolean;
+}) {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [selected, setSelected] = useState("KSEA");
-  const [all, setAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -625,18 +629,19 @@ export function WeatherDashboardClient() {
 
   const visible = useMemo(() => {
     if (!data) return [];
-    return all ? data.stations : data.stations.filter((station) => station.stid === selected);
-  }, [all, data, selected]);
+    return data.stations.filter((station) => station.stid === selectedStid);
+  }, [data, selectedStid]);
 
   const rapid = (() => { const minute = new Date().getMinutes(); return minute >= 49 || minute <= 2; })();
 
   return (
-    <div className={styles.dashboard}>
-      <header className={styles.topbar}><div><span>Mercury Edge</span><h1>Weather Reports</h1></div><button onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</button></header>
-      <nav className={styles.stationNav} aria-label="Weather stations">
-        {data?.stations.map((station) => <button key={station.stid} className={!all && selected === station.stid ? styles.activeTab : ""} onClick={() => { setSelected(station.stid); setAll(false); }}><b>{station.city}</b><small>{station.stid}</small></button>)}
-        <button className={all ? styles.activeTab : ""} onClick={() => setAll(true)}><b>All</b><small>scroll</small></button>
-      </nav>
+    <div className={`${styles.dashboard} ${embedded ? styles.embeddedDashboard : ""}`}>
+      {!embedded && <header className={styles.topbar}><div><span>Mercury Edge</span><h1>Weather Reports</h1></div><button onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</button></header>}
+      {!embedded && (
+        <nav className={styles.stationNav} aria-label="Weather stations">
+          {data?.stations.map((station) => <button key={station.stid} className={selectedStid === station.stid ? styles.activeTab : ""}><b>{station.city}</b><small>{station.stid}</small></button>)}
+        </nav>
+      )}
       <div className={styles.statusLine}>
         <span className={error ? styles.badDot : styles.goodDot} />
         <span>{error ? error : data ? `${rapid ? "Rapid 2s official-report polling" : "Live"} · TWC trajectory · refreshed ${new Date(data.updatedAt).toLocaleTimeString()}` : "Connecting to weather feeds…"}</span>
