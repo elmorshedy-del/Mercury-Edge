@@ -18,7 +18,6 @@ type Station = {
   timezone: string | null;
   official: WeatherRow[];
   hf?: WeatherRow[];
-  forecastBaseline?: ForecastBaseline | null;
 };
 
 type ForecastPoint = {
@@ -32,6 +31,7 @@ type ForecastBaseline = {
 };
 
 type DashboardPayload = { stations: Station[] };
+type NwsPayload = { forecasts: Array<{ stid: string; baseline: ForecastBaseline }> };
 type SignalPoint = { time: string; minute: number; value: number };
 type Standout = { time: string; title: string; detail: string; raw: string | null };
 
@@ -194,7 +194,7 @@ function buildModel(station: Station, baseline: ForecastBaseline | null) {
     if (weakHold && hotOrRising) {
       const heatEvidence = [
         tempGain60 === null ? null : `temp ${tempGain60 >= 0 ? "+" : ""}${tempGain60.toFixed(1)}°F/60m`,
-        tempResidual === null ? null : `${tempResidual >= 0 ? "+" : ""}${tempResidual.toFixed(1)}°F vs TWC path`,
+        tempResidual === null ? null : `${tempResidual >= 0 ? "+" : ""}${tempResidual.toFixed(1)}°F vs NWS path`,
       ].filter(Boolean).join(" · ");
       standouts.push({
         time: row.time,
@@ -251,13 +251,18 @@ export function LaxCapWatch({ selectedStid = "KLAX" }: { selectedStid?: string }
     let cancelled = false;
     const load = async () => {
       try {
-        const weatherResponse = await fetch(`/api/weather-dashboard?laxCap=${Date.now()}`, { cache: "no-store" });
+        const [weatherResponse, nwsResponse] = await Promise.all([
+          fetch(`/api/weather-dashboard?laxCap=${Date.now()}`, { cache: "no-store" }),
+          fetch(`/api/weather-dashboard/nws-forecast?laxCap=${Date.now()}`, { cache: "no-store" }),
+        ]);
         const weather = await weatherResponse.json() as DashboardPayload & { error?: string };
+        const nws = await nwsResponse.json() as NwsPayload & { error?: string };
         if (!weatherResponse.ok) throw new Error(weather.error ?? "Weather feed failed");
         const lax = weather.stations.find((item) => item.stid === LAX) ?? null;
+        const nwsBaseline = nwsResponse.ok ? nws.forecasts.find((item) => item.stid === LAX)?.baseline ?? null : null;
         if (!cancelled) {
           setStation(lax);
-          setBaseline(lax?.forecastBaseline ?? null);
+          setBaseline(nwsBaseline);
           setError(null);
         }
       } catch (err) {
