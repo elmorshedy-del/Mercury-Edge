@@ -183,7 +183,6 @@ export async function GET(request: NextRequest) {
       }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
     }
 
-    const now = new Date();
     // Pull a wide UTC window around the requested local calendar day, then
     // filter every candle back to that station's local date. This works for
     // both live and archived days instead of silently limiting history to 36h.
