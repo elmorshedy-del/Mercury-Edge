@@ -145,7 +145,6 @@ function chartModel(station: Station) {
 
 function AnchorChart({ station }: { station: Station }) {
   const model = useMemo(() => chartModel(station), [station]);
-  const sourceShort = station.forecastBaseline?.source === "twc" ? "TWC" : "NWS";
   if (!station.timezone) return <div className={deskStyles.empty}>Station timezone is unavailable.</div>;
   if (!model || (!model.anchor.length && !model.actual.length)) {
     return <div className={deskStyles.empty}>No observations are available for today yet.</div>;
@@ -177,7 +176,7 @@ function AnchorChart({ station }: { station: Station }) {
       <div className={deskStyles.title}>
         <div>
           <span>Anchor + response · {model.targetDate}</span>
-          <h3>{hasAnchor ? "Frozen TWC path vs actual" : "Observed temperature path · NWS anchor loading"}</h3>
+          <h3>{hasAnchor ? "Frozen TWC path vs actual" : "Observed temperature path · TWC anchor loading"}</h3>
         </div>
         <small>{hasAnchor ? `TWC high ${station.forecastBaseline?.forecastHigh === null || station.forecastBaseline?.forecastHigh === undefined ? "—" : `${station.forecastBaseline.forecastHigh.toFixed(0)}°F`}` : "TWC forecast unavailable"}</small>
       </div>
