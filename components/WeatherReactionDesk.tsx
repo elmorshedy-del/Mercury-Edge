@@ -46,7 +46,6 @@ type Station = {
 };
 
 type DashboardData = { stations: Station[]; updatedAt: string; forecastConfigured?: boolean };
-type NwsForecastPayload = { forecasts: Array<{ stid: string; baseline: ForecastBaseline }> };
 type Point = { minute: number; temp: number; time?: string };
 type SeriesPoint = { minute: number; value: number; time?: string };
 type Shock = { minute: number; time: string; delta: number };
@@ -146,6 +145,7 @@ function chartModel(station: Station) {
 
 function AnchorChart({ station }: { station: Station }) {
   const model = useMemo(() => chartModel(station), [station]);
+  const sourceShort = station.forecastBaseline?.source === "twc" ? "TWC" : "NWS";
   if (!station.timezone) return <div className={deskStyles.empty}>Station timezone is unavailable.</div>;
   if (!model || (!model.anchor.length && !model.actual.length)) {
     return <div className={deskStyles.empty}>No observations are available for today yet.</div>;
@@ -177,12 +177,12 @@ function AnchorChart({ station }: { station: Station }) {
       <div className={deskStyles.title}>
         <div>
           <span>Anchor + response · {model.targetDate}</span>
-          <h3>{hasAnchor ? "Frozen NWS path vs actual" : "Observed temperature path · NWS anchor loading"}</h3>
+          <h3>{hasAnchor ? "Frozen TWC path vs actual" : "Observed temperature path · NWS anchor loading"}</h3>
         </div>
-        <small>{hasAnchor ? `NWS high ${station.forecastBaseline?.forecastHigh === null || station.forecastBaseline?.forecastHigh === undefined ? "—" : `${station.forecastBaseline.forecastHigh.toFixed(0)}°F`}` : "NWS forecast unavailable"}</small>
+        <small>{hasAnchor ? `TWC high ${station.forecastBaseline?.forecastHigh === null || station.forecastBaseline?.forecastHigh === undefined ? "—" : `${station.forecastBaseline.forecastHigh.toFixed(0)}°F`}` : "TWC forecast unavailable"}</small>
       </div>
       <div className={deskStyles.legend}>
-        {hasAnchor && <span><i className={deskStyles.anchorKey} />Frozen NWS anchor</span>}
+        {hasAnchor && <span><i className={deskStyles.anchorKey} />Frozen TWC anchor</span>}
         <span><i className={deskStyles.actualKey} />Observed METAR</span>
         {hasAnchor && <span><i className={deskStyles.shockKey} />Temperature residual shock ≥0.9°F</span>}
       </div>
@@ -206,7 +206,7 @@ function AnchorChart({ station }: { station: Station }) {
           ))}
         </svg>
       </div>
-      <p className={deskStyles.note}>The NWS path is frozen for the day so actual weather can be judged against the conditions the forecast expected, rather than against a forecast that keeps moving after the fact.</p>
+      <p className={deskStyles.note}>The TWC path is frozen for the day so actual weather can be judged against the conditions the forecast expected, rather than against a forecast that keeps moving after the fact.</p>
     </section>
   );
 }
@@ -329,45 +329,37 @@ function DriverPanel({ station }: { station: Station }) {
       <div className={deskStyles.driverHeader}>
         <div>
           <span>Leading-condition departures</span>
-          <h3>What is moving away from NWS before temperature does?</h3>
+          <h3>What is moving away from TWC before temperature does?</h3>
         </div>
-        <small>All strips share the same clock. The center line means “tracking NWS.”</small>
+        <small>All strips share the same clock. The center line means “tracking TWC.”</small>
       </div>
-      <ResidualStrip title="Cloud excess" explanation="Up = cloudier than NWS · down = clearer" points={series.cloud} unit="pp" minScale={20} />
-      <ResidualStrip title="Airflow departure" explanation="Up = wind vector increasingly unlike NWS" points={series.wind} unit=" mph" minScale={5} zeroCentered={false} />
-      <ResidualStrip title="Dew-point residual" explanation="Up = moister than NWS · down = drier" points={series.dew} unit="°F" minScale={3} />
-      <ResidualStrip title="Temperature residual" explanation="Response: actual minus the frozen NWS path" points={series.temp} unit="°F" minScale={2} showClock />
+      <ResidualStrip title="Cloud excess" explanation="Up = cloudier than TWC · down = clearer" points={series.cloud} unit="pp" minScale={20} />
+      <ResidualStrip title="Airflow departure" explanation="Up = wind vector increasingly unlike TWC" points={series.wind} unit=" mph" minScale={5} zeroCentered={false} />
+      <ResidualStrip title="Dew-point residual" explanation="Up = moister than TWC · down = drier" points={series.dew} unit="°F" minScale={3} />
+      <ResidualStrip title="Temperature residual" explanation="Response: actual minus the frozen TWC path" points={series.temp} unit="°F" minScale={2} showClock />
       <p className={deskStyles.driverNote}>The useful pattern is lead/lag: a driver strip begins departing first, then the temperature-residual strip bends in the same episode. No composite score is imposed yet, so repeated days can teach which shapes actually matter at each station.</p>
     </section>
   );
 }
 
-export function WeatherReactionDesk() {
+export function WeatherReactionDesk({
+  selectedStid = "KNYC",
+  embedded = false,
+}: {
+  selectedStid?: string;
+  embedded?: boolean;
+}) {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [selected, setSelected] = useState("KNYC");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const [response, nwsResponse] = await Promise.all([
-          fetch(`/api/weather-dashboard?reactionDesk=${Date.now()}`, { cache: "no-store" }),
-          fetch(`/api/weather-dashboard/nws-forecast?reactionDesk=${Date.now()}`, { cache: "no-store" }),
-        ]);
-        const payload = await response.json();
-        const nwsPayload = await nwsResponse.json() as NwsForecastPayload & { error?: string };
+        const response = await fetch(`/api/weather-dashboard?reactionDesk=${Date.now()}`, { cache: "no-store" });
+        const payload = await response.json() as DashboardData & { error?: string };
         if (!response.ok) throw new Error(payload.error ?? "Weather dashboard feed failed");
-        if (!nwsResponse.ok) throw new Error(nwsPayload.error ?? "NWS forecast feed failed");
-        const byStid = new Map(nwsPayload.forecasts.map((item) => [item.stid, item.baseline]));
-        const merged: DashboardData = {
-          ...payload,
-          stations: payload.stations.map((station: Station) => ({
-            ...station,
-            forecastBaseline: byStid.get(station.stid) ?? null,
-          })),
-        };
-        if (!cancelled) { setData(merged); setError(null); }
+        if (!cancelled) { setData(payload); setError(null); }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load reaction desk");
       }
@@ -377,21 +369,16 @@ export function WeatherReactionDesk() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
 
-  const station = data?.stations.find((item) => item.stid === selected) ?? data?.stations[0] ?? null;
+  const station = data?.stations.find((item) => item.stid === selectedStid) ?? data?.stations[0] ?? null;
   if (error) return <section className={deskStyles.desk}><div className={deskStyles.empty}>{error}</div></section>;
   if (!station) return <section className={deskStyles.desk}><div className={deskStyles.empty}>Loading NWS ↔ Kalshi reaction desk…</div></section>;
 
   return (
     <section className={deskStyles.desk}>
       <header className={deskStyles.header}>
-        <div><span>Mercury reaction desk</span><h2>NWS anchor ↔ observed drivers ↔ Kalshi</h2></div>
-        <small>One shared clock: frozen NWS expectation, observed driver departures, temperature response and Kalshi bucket repricing.</small>
+        <div><span>Mercury reaction desk</span><h2>TWC anchor ↔ observed drivers ↔ Kalshi</h2></div>
+        <small>One shared clock: frozen TWC expectation, observed driver departures, temperature response and Kalshi bucket repricing.</small>
       </header>
-      <nav className={deskStyles.tabs} aria-label="Reaction desk stations">
-        {data?.stations.map((item) => (
-          <button key={item.stid} className={item.stid === station.stid ? deskStyles.active : ""} onClick={() => setSelected(item.stid)}>{item.city}</button>
-        ))}
-      </nav>
       <AnchorChart station={station} />
       <DriverPanel station={station} />
       <MarketReactionPanel
