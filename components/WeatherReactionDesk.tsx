@@ -369,8 +369,8 @@ export function WeatherReactionDesk({
   }, []);
 
   const station = data?.stations.find((item) => item.stid === selectedStid) ?? data?.stations[0] ?? null;
-  if (error) return <section className={deskStyles.desk}><div className={deskStyles.empty}>{error}</div></section>;
-  if (!station) return <section className={deskStyles.desk}><div className={deskStyles.empty}>Loading NWS ↔ Kalshi reaction desk…</div></section>;
+  if (error) return <section className={`${deskStyles.desk} ${embedded ? deskStyles.embedded : ""}`}><div className={deskStyles.empty}>{error}</div></section>;
+  if (!station) return <section className={deskStyles.desk}><div className={deskStyles.empty}>Loading TWC ↔ Kalshi reaction desk…</div></section>;
 
   return (
     <section className={deskStyles.desk}>
