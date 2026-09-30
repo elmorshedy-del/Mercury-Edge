@@ -18,6 +18,7 @@ type Station = {
   timezone: string | null;
   official: WeatherRow[];
   hf?: WeatherRow[];
+  forecastBaseline?: ForecastBaseline | null;
 };
 
 type ForecastPoint = {
@@ -31,7 +32,6 @@ type ForecastBaseline = {
 };
 
 type DashboardPayload = { stations: Station[] };
-type NwsPayload = { forecasts: Array<{ stid: string; baseline: ForecastBaseline }> };
 type SignalPoint = { time: string; minute: number; value: number };
 type Standout = { time: string; title: string; detail: string; raw: string | null };
 
@@ -194,7 +194,7 @@ function buildModel(station: Station, baseline: ForecastBaseline | null) {
     if (weakHold && hotOrRising) {
       const heatEvidence = [
         tempGain60 === null ? null : `temp ${tempGain60 >= 0 ? "+" : ""}${tempGain60.toFixed(1)}°F/60m`,
-        tempResidual === null ? null : `${tempResidual >= 0 ? "+" : ""}${tempResidual.toFixed(1)}°F vs NWS path`,
+        tempResidual === null ? null : `${tempResidual >= 0 ? "+" : ""}${tempResidual.toFixed(1)}°F vs TWC path`,
       ].filter(Boolean).join(" · ");
       standouts.push({
         time: row.time,
@@ -242,7 +242,7 @@ function SignalStrip({ title, subtitle, points }: { title: string; subtitle: str
   );
 }
 
-export function LaxCapWatch() {
+export function LaxCapWatch({ selectedStid = "KLAX" }: { selectedStid?: string }) {
   const [station, setStation] = useState<Station | null>(null);
   const [baseline, setBaseline] = useState<ForecastBaseline | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -251,18 +251,13 @@ export function LaxCapWatch() {
     let cancelled = false;
     const load = async () => {
       try {
-        const [weatherResponse, nwsResponse] = await Promise.all([
-          fetch(`/api/weather-dashboard?laxCap=${Date.now()}`, { cache: "no-store" }),
-          fetch(`/api/weather-dashboard/nws-forecast?laxCap=${Date.now()}`, { cache: "no-store" }),
-        ]);
+        const weatherResponse = await fetch(`/api/weather-dashboard?laxCap=${Date.now()}`, { cache: "no-store" });
         const weather = await weatherResponse.json() as DashboardPayload & { error?: string };
-        const nws = await nwsResponse.json() as NwsPayload & { error?: string };
         if (!weatherResponse.ok) throw new Error(weather.error ?? "Weather feed failed");
         const lax = weather.stations.find((item) => item.stid === LAX) ?? null;
-        const nwsBaseline = nwsResponse.ok ? nws.forecasts.find((item) => item.stid === LAX)?.baseline ?? null : null;
         if (!cancelled) {
           setStation(lax);
-          setBaseline(nwsBaseline);
+          setBaseline(lax?.forecastBaseline ?? null);
           setError(null);
         }
       } catch (err) {
@@ -275,6 +270,7 @@ export function LaxCapWatch() {
   }, []);
 
   const model = useMemo(() => station ? buildModel(station, baseline) : null, [station, baseline]);
+  if (selectedStid !== LAX) return null;
   if (error) return <section className={styles.watch}><div className={styles.empty}>{error}</div></section>;
   if (!station || !model) return null;
 
