@@ -484,21 +484,21 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
 
       <div className={styles.trajectoryStats}>
         <div><span>{sourceShort} calendar-day high</span><b>{station.forecastBaseline.forecastHigh !== null ? `${station.forecastBaseline.forecastHigh.toFixed(0)}°F` : model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° hourly peak` : "—"}</b></div>
-        <div><span>Floored METAR max</span><b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b></div>
+        <div><span>METAR max</span><b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b></div>
         <div><span>6h max revealed</span><b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(0)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b></div>
         <div><span>Adaptive hourly max</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
       </div>
 
       <div className={styles.trajectoryLegend}>
         <span><i className={styles.legendOriginal} />Original {sourceShort} hourly path</span>
-        <span><i className={styles.legendObserved} />Hourly METAR (floor °F)</span>
+        <span><i className={styles.legendObserved} />Hourly METAR (decoded whole °F)</span>
         <span><i className={styles.legendAdaptive} />Kalman adaptive future</span>
         {model.latestResidual !== null && <span>Latest miss {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
         <span>{model.mechanism.label}</span>
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} ${sourceShort} hourly forecast, floored hourly METAR observations, and adaptive future trajectory`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} ${sourceShort} hourly forecast, decoded hourly METAR observations, and adaptive future trajectory`}>
           {[yMin, middleTick, yMax].map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -558,7 +558,7 @@ function StationCard({ station }: { station: Station }) {
       </section>
 
       <section className={styles.sectionBlock}>
-        <div className={styles.sectionTitle}><div><span>Official stream</span><h3>Hourly / SPECI reports</h3></div><small>Raw tenth °C T-group → floor °F</small></div>
+        <div className={styles.sectionTitle}><div><span>Official stream</span><h3>Hourly / SPECI reports</h3></div><small>Raw tenth °C T-group → decoded whole °F</small></div>
         <div className={styles.reportList}>
           {station.official.length ? station.official.map((row) => (
             <details className={styles.report} key={`${row.time}-${row.raw ?? "official"}`}><summary><time>{timeLabel(row.time, station.timezone)} · {reportType(row)}</time><b>{temp(row.temp, 0)}</b><span>{windLabel(row)}</span></summary><code>{row.raw ?? "No raw METAR text"}</code></details>
@@ -567,7 +567,7 @@ function StationCard({ station }: { station: Station }) {
       </section>
 
       <section className={styles.sectionBlock}>
-        <div className={styles.sectionTitle}><div><span>Max/min fields</span><h3>6-hour reports</h3></div><small>Official reported high / low</small></div>
+        <div className={styles.sectionTitle}><div><span>Max/min fields</span><h3>6-hour reports</h3></div><small>Tenths °C max/min groups → decoded whole °F</small></div>
         {station.sixHour.length ? (
           <TableShell><table><thead><tr><th>Time</th><th>6h high</th><th>6h low</th><th>Temp</th></tr></thead><tbody>
             {station.sixHour.map((row) => <tr key={`${row.time}-six`}><td>{timeLabel(row.time, station.timezone)}</td><td className={styles.highCell}>{temp(row.high6, 0)}</td><td>{temp(row.low6, 0)}</td><td>{temp(row.temp, 0)}</td></tr>)}
@@ -650,7 +650,7 @@ export function WeatherDashboardClient() {
       {data?.twsConnected && <div className={styles.notice}>Weather Company feed verified{data.twsLastVerifiedAt ? ` at ${new Date(data.twsLastVerifiedAt).toLocaleTimeString()}` : ""}. Provider data is cached server-side for {Math.round((data.twsCacheSeconds ?? 600) / 60)} minutes, so fast dashboard polling does not repeatedly consume API calls.</div>}
       {data?.twsConfigured && !data.twsConnected && <div className={styles.notice}>The Weather Company key is configured, but the latest provider fetch did not succeed. The existing trajectory stays isolated from that failure.</div>}
       {data && data.forecastConfigured === false && <div className={styles.notice}>The Weather Company trajectory is coded but no API key is configured on this deployment, so the trajectory panel will stay hidden until a server-side key is added.</div>}
-      <div className={styles.notice}>HF-ASOS temperatures are transmitted in whole °C and remain a coarse decimal conversion. Official METAR and 6-hour values use the raw tenths-°C group first, then floor the Fahrenheit result; the hourly chart uses those same floored values. TWC forecast snapshots are archived in 15-minute buckets for walk-forward trajectory research.</div>
+      <div className={styles.notice}>HF-ASOS temperatures are transmitted in whole °C and remain a coarse conversion, so the conservative floor logic stays there. Official METAR T-groups and 6-hour/24-hour max-min groups are encoded in tenths °C and are decoded back to the nearest whole °F with half-up rounding. TWC forecast snapshots are archived in 15-minute buckets for walk-forward trajectory research.</div>
       <main className={styles.cards}>{visible.map((station) => <StationCard station={station} key={station.stid} />)}{!visible.length && !loading && !error && <div className={styles.empty}>No station data returned.</div>}</main>
     </div>
   );
