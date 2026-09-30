@@ -477,7 +477,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       <div className={styles.sectionTitle}>
         <div>
           <span>Daily trajectory</span>
-          <h3>{sourceShort} forecast vs floored hourly METAR</h3>
+          <h3>{sourceShort} forecast vs decoded hourly METAR</h3>
         </div>
         <small>{sourceShort} baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
       </div>
@@ -536,7 +536,7 @@ function StationCard({ station }: { station: Station }) {
       </header>
 
       <section className={styles.heroReadout}>
-        <div><span>Latest</span><strong>{temp(station.latest?.temp ?? null, station.latest?.kind === "official" ? 0 : 1)}</strong><small>{station.latest ? `${timeLabel(station.latest.time, station.timezone)} · ${reportType(station.latest)}` : "No report"}</small></div>
+        <div><span>Latest</span><strong>{temp(station.latest?.temp ?? null, 0)}</strong><small>{station.latest ? `${timeLabel(station.latest.time, station.timezone)} · ${reportType(station.latest)}` : "No report"}</small></div>
         <div className={styles.miniStats}>
           <div><span>6h high</span><b>{temp(latest6?.high6 ?? null, 0)}</b></div>
           <div><span>6h low</span><b>{temp(latest6?.low6 ?? null, 0)}</b></div>
@@ -549,10 +549,10 @@ function StationCard({ station }: { station: Station }) {
       <AdaptiveTrajectory station={station} />
 
       <section className={styles.sectionBlock}>
-        <div className={styles.sectionTitle}><div><span>High frequency</span><h3>5-minute ASOS</h3></div><small>Whole °C feed → displayed °F</small></div>
+        <div className={styles.sectionTitle}><div><span>High frequency</span><h3>5-minute ASOS</h3></div><small>Whole °C wire → conservative floor °F</small></div>
         {station.hf.length ? (
           <TableShell><table><thead><tr><th>Time</th><th>Temp</th><th>Wind</th><th>RH</th><th>Alt</th></tr></thead><tbody>
-            {station.hf.map((row) => <tr key={`${row.time}-${row.raw ?? "hf"}`}><td>{timeLabel(row.time, station.timezone)}</td><td className={styles.tempCell}>{temp(row.temp)}</td><td>{windLabel(row)}</td><td>{value(row.rh, "%")}</td><td>{value(row.altimeter)}</td></tr>)}
+            {station.hf.map((row) => <tr key={`${row.time}-${row.raw ?? "hf"}`}><td>{timeLabel(row.time, station.timezone)}</td><td className={styles.tempCell}>{temp(row.temp, 0)}</td><td>{windLabel(row)}</td><td>{value(row.rh, "%")}</td><td>{value(row.altimeter)}</td></tr>)}
           </tbody></table></TableShell>
         ) : <div className={styles.empty}>No 5-minute HF-ASOS rows are available for this station in Synoptic.</div>}
       </section>

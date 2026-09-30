@@ -262,7 +262,9 @@ function normalizeStation(station: AnyRecord) {
     const sourceLow6F = num(valueAt(obs, keys.low6, index));
     return {
       time: str(date) ?? "",
-      temp: kind === "official" ? metarTemperatureFromF(raw, sourceTempF) : sourceTempF,
+      // HF-ASOS/Synoptic is a coarse whole-C wire rendered by the provider as
+      // decimal F. Keep the conservative lower-bound decode on that lane only.
+      temp: kind === "official" ? metarTemperatureFromF(raw, sourceTempF) : floorF(sourceTempF),
       dewPoint: kind === "official" ? metarDewPointFromF(raw, sourceDewF) : sourceDewF,
       cloudCover: cloudCoverFromRaw(raw),
       rh: num(valueAt(obs, keys.rh, index)),

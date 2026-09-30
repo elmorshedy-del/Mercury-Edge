@@ -91,7 +91,12 @@ function normalizeStation(station: AnyRecord, timezone: string): HfRow[] {
       if (localDate(timezone, new Date(time)) !== today) return null;
       return {
         time,
-        temp: num(valueAt(obs, keys.temp, index)),
+        // Synoptic's English value is the decimal C→F rendering of the coarse
+        // whole-C HF wire. Floor it to the hard lower-bound whole-F value.
+        temp: (() => {
+          const sourceF = num(valueAt(obs, keys.temp, index));
+          return sourceF === null ? null : Math.floor(sourceF);
+        })(),
         dewPoint: num(valueAt(obs, keys.dew, index)),
         rh: num(valueAt(obs, keys.rh, index)),
         windSpeed: num(valueAt(obs, keys.windSpeed, index)),

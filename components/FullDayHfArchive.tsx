@@ -33,8 +33,8 @@ function timeLabel(iso: string, timezone: string) {
   }).format(new Date(iso));
 }
 
-function temp(value: number | null) {
-  return value === null ? "—" : `${value.toFixed(1)}°F`;
+function temp(value: number | null, digits = 1) {
+  return value === null ? "—" : `${value.toFixed(digits)}°F`;
 }
 
 function value(value: number | null, suffix = "") {
@@ -113,7 +113,7 @@ export function FullDayHfArchive({
               {station.rows.map((row) => (
                 <tr key={`${row.time}-${row.raw ?? "hf"}`}>
                   <td>{timeLabel(row.time, station.timezone)}</td>
-                  <td className={styles.temp}>{temp(row.temp)}</td>
+                  <td className={styles.temp}>{temp(row.temp, 0)}</td>
                   <td>{temp(row.dewPoint)}</td>
                   <td>{wind(row)}</td>
                   <td>{value(row.rh, "%")}</td>
