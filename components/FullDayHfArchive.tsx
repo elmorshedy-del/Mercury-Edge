@@ -48,9 +48,14 @@ function wind(row: HfRow) {
   return [direction, speed].filter(Boolean).join(" · ");
 }
 
-export function FullDayHfArchive() {
+export function FullDayHfArchive({
+  selectedStid = "KNYC",
+  embedded = false,
+}: {
+  selectedStid?: string;
+  embedded?: boolean;
+}) {
   const [data, setData] = useState<Payload | null>(null);
-  const [selected, setSelected] = useState("KLAX");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -77,8 +82,8 @@ export function FullDayHfArchive() {
   }, []);
 
   const station = useMemo(
-    () => data?.stations.find((item) => item.stid === selected) ?? data?.stations[0] ?? null,
-    [data, selected],
+    () => data?.stations.find((item) => item.stid === selectedStid) ?? data?.stations[0] ?? null,
+    [data, selectedStid],
   );
 
   if (error) return <section className={styles.archive}><div className={styles.empty}>{error}</div></section>;
@@ -94,17 +99,7 @@ export function FullDayHfArchive() {
         <small>{station.localDate} · {station.count} observations · midnight onward</small>
       </header>
 
-      <nav className={styles.tabs} aria-label="Full-day HF station">
-        {data?.stations.map((item) => (
-          <button
-            key={item.stid}
-            className={item.stid === station.stid ? styles.active : ""}
-            onClick={() => setSelected(item.stid)}
-          >
-            {item.city} <em>{item.count}</em>
-          </button>
-        ))}
-      </nav>
+      {!embedded && <div className={styles.singleStation}>Shared city: {station.city} · {station.stid}</div>}
 
       <p className={styles.note}>Rows do not roll off during the local calendar day. New HF observations are added at the top; the page simply grows downward so the entire intraday sequence remains visually reviewable.</p>
 
