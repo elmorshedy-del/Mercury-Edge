@@ -19,6 +19,8 @@ type KalshiMarket = {
   yes_bid_dollars?: string;
   yes_ask_dollars?: string;
   last_price_dollars?: string;
+  result?: string;
+  settlement_value?: number | string | null;
 };
 
 type KalshiEventPayload = {
@@ -124,9 +126,10 @@ async function twcRevisionMarkers(stid: string, date: string) {
       `SELECT captured_at, daily_highs
        FROM weather_forecast_snapshots
        WHERE stid = $1 AND source = 'twc'
-         AND captured_at >= now() - interval '36 hours'
+         AND captured_at >= ($2::date - interval '2 days')
+         AND captured_at < ($2::date + interval '2 days')
        ORDER BY captured_at ASC`,
-      [stid],
+      [stid, date],
     );
     const markers: Array<{ time: string; forecastHigh: number; delta: number | null }> = [];
     let prior: number | null = null;
@@ -174,14 +177,19 @@ export async function GET(request: NextRequest) {
         markets: [],
         marketCenter: [],
         leader: null,
+        winningBucket: null,
         twcRevisions: await twcRevisionMarkers(stid, targetDate),
         updatedAt: new Date().toISOString(),
       }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
     }
 
     const now = new Date();
-    const start = new Date(now.getTime() - 36 * 60 * 60 * 1000);
-    const end = new Date(now.getTime() + 5 * 60 * 1000);
+    // Pull a wide UTC window around the requested local calendar day, then
+    // filter every candle back to that station's local date. This works for
+    // both live and archived days instead of silently limiting history to 36h.
+    const targetNoonUtc = new Date(`${targetDate}T12:00:00.000Z`);
+    const start = new Date(targetNoonUtc.getTime() - 30 * 60 * 60 * 1000);
+    const end = new Date(targetNoonUtc.getTime() + 30 * 60 * 60 * 1000);
     const marketSeries: MarketSeries[] = await Promise.all(event.markets.map(async (market) => {
       const band = bandFromMarket(market);
       const quotes: MarketQuote[] = await getMinuteCandles(station.kalshiSeries, market.ticker, start, end)
@@ -199,8 +207,11 @@ export async function GET(request: NextRequest) {
         });
 
       if (!quotes.length) {
+        const fallbackTime = market.close_time && localDate(market.close_time, station.timezone) === targetDate
+          ? market.close_time
+          : `${targetDate}T23:59:00.000Z`;
         quotes.push({
-          time: now.toISOString(),
+          time: fallbackTime,
           yesBid: numberOrNull(market.yes_bid_dollars),
           yesAsk: numberOrNull(market.yes_ask_dollars),
           lastPrice: numberOrNull(market.last_price_dollars),
@@ -208,6 +219,10 @@ export async function GET(request: NextRequest) {
       }
       return { ...band, quotes };
     }));
+
+    const winningMarket = event.markets.find((market) => String(market.result ?? "").toLowerCase() === "yes") ?? null;
+    const winningBand = winningMarket ? bandFromMarket(winningMarket) : null;
+    const settlementValue = winningMarket ? numberOrNull(winningMarket.settlement_value) : null;
 
     const marketCenter = buildMarketCenter(marketSeries);
     const latestMarkets = marketSeries.map((market) => {
@@ -228,6 +243,7 @@ export async function GET(request: NextRequest) {
       markets: latestMarkets,
       marketCenter,
       leader: leader ? { ticker: leader.ticker, label: leader.label, probability: leader.latestMid } : null,
+      winningBucket: winningBand ? { ...winningBand, settlementValue } : null,
       twcRevisions: await twcRevisionMarkers(stid, targetDate),
       updatedAt: new Date().toISOString(),
     }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
