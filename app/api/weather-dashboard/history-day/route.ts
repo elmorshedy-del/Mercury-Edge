@@ -63,11 +63,11 @@ export async function GET(request: NextRequest) {
     if (!row) {
       const snapshot = await query<SnapshotRow>(
         `SELECT captured_at, issued_at,
-                NULLIF(daily_highs ->> $2, '')::real AS forecast_high
+                NULLIF(daily_highs ->> ($2::text), '')::real AS forecast_high
          FROM weather_forecast_snapshots
          WHERE stid = $1 AND source = 'twc'
            AND captured_at < ($2::date::timestamp AT TIME ZONE $3)
-           AND daily_highs ? $2
+           AND daily_highs ? ($2::text)
          ORDER BY captured_at DESC
          LIMIT 1`,
         [stid, date, config.timezone],
