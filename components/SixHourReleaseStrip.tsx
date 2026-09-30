@@ -80,7 +80,7 @@ function countdown(expectedMs: number | null, nowMs: number, due: boolean) {
   return `in ${seconds}s`;
 }
 
-export function SixHourReleaseStrip() {
+export function SixHourReleaseStrip({ selectedStid }: { selectedStid?: string; embedded?: boolean }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
@@ -101,8 +101,10 @@ export function SixHourReleaseStrip() {
   }, []);
 
   const schedules = useMemo(
-    () => data?.stations.map((station) => ({ station, ...scheduleFromLatest(station, nowMs) })) ?? [],
-    [data, nowMs],
+    () => (data?.stations ?? [])
+      .filter((station) => !selectedStid || station.stid === selectedStid)
+      .map((station) => ({ station, ...scheduleFromLatest(station, nowMs) })),
+    [data, nowMs, selectedStid],
   );
 
   const rapid = schedules.some(({ expectedMs }) => expectedMs !== null && Math.abs(expectedMs - nowMs) <= 10 * 60 * 1000);
