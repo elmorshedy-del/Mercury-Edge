@@ -136,8 +136,20 @@ function floorCToF(value: number | null) {
   return fahrenheit === null ? null : Math.floor(fahrenheit);
 }
 
+function decodeTenthsCToWholeF(value: number | null) {
+  const fahrenheit = cToF(value);
+  // METAR T-groups and 6h/24h temperature groups are encoded to 0.1 C
+  // from the station's whole-F value. Decode them with half-up rounding;
+  // flooring is only for coarse whole-C observations.
+  return fahrenheit === null ? null : Math.floor(fahrenheit + 0.5);
+}
+
 function floorF(value: number | null) {
   return value === null ? null : Math.floor(value);
+}
+
+function roundWholeF(value: number | null) {
+  return value === null ? null : Math.floor(value + 0.5);
 }
 
 function knotsToMph(value: number | null) {
@@ -158,12 +170,12 @@ function parseMetarThermo(raw: string | null) {
 
 function metarTemperatureFromF(raw: string | null, fallbackF: number | null) {
   const precise = parseMetarThermo(raw);
-  return precise === null ? floorF(fallbackF) : floorCToF(precise.tempC);
+  return precise === null ? floorF(fallbackF) : decodeTenthsCToWholeF(precise.tempC);
 }
 
 function metarTemperatureFromC(raw: string | null, fallbackC: number | null) {
   const precise = parseMetarThermo(raw);
-  return floorCToF(precise?.tempC ?? fallbackC);
+  return precise === null ? floorCToF(fallbackC) : decodeTenthsCToWholeF(precise.tempC);
 }
 
 function metarDewPointFromF(raw: string | null, fallbackF: number | null) {
@@ -205,7 +217,7 @@ function parseSixHourFromRaw(raw: string | null, group: "1" | "2") {
   const match = raw.match(new RegExp(`(?:^|\\s)${group}([01])(\\d{3})(?=\\s|$)`));
   if (!match) return null;
   const c = Number(match[2]) / 10 * (match[1] === "1" ? -1 : 1);
-  return floorCToF(c);
+  return decodeTenthsCToWholeF(c);
 }
 
 function classify(raw: string | null): Row["kind"] {
@@ -258,10 +270,10 @@ function normalizeStation(station: AnyRecord) {
       windDirection: num(valueAt(obs, keys.windDirection, index)),
       altimeter: num(valueAt(obs, keys.altimeter, index)),
       seaLevelPressure: num(valueAt(obs, keys.seaLevelPressure, index)),
-      high6: parseSixHourFromRaw(raw, "1") ?? floorF(sourceHigh6F),
-      low6: parseSixHourFromRaw(raw, "2") ?? floorF(sourceLow6F),
-      high24: floorF(num(valueAt(obs, keys.high24, index))),
-      low24: floorF(num(valueAt(obs, keys.low24, index))),
+      high6: parseSixHourFromRaw(raw, "1") ?? roundWholeF(sourceHigh6F),
+      low6: parseSixHourFromRaw(raw, "2") ?? roundWholeF(sourceLow6F),
+      high24: roundWholeF(num(valueAt(obs, keys.high24, index))),
+      low24: roundWholeF(num(valueAt(obs, keys.low24, index))),
       raw,
       kind,
       reportType: reportTypeFromRaw(raw, kind),
@@ -290,8 +302,8 @@ function normalizeAwc(item: AnyRecord): { stid: string; row: Row } | null {
   if (!time) return null;
   const maxFromRaw = parseSixHourFromRaw(raw, "1");
   const minFromRaw = parseSixHourFromRaw(raw, "2");
-  const awcMax = floorCToF(num(item.maxT));
-  const awcMin = floorCToF(num(item.minT));
+  const awcMax = decodeTenthsCToWholeF(num(item.maxT));
+  const awcMin = decodeTenthsCToWholeF(num(item.minT));
   return {
     stid,
     row: {
