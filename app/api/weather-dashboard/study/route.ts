@@ -12,6 +12,7 @@ type KalshiMarket = {
   floor_strike?: number | string | null;
   cap_strike?: number | string | null;
   result?: string;
+  expiration_value?: number | string | null;
   settlement_value?: number | string | null;
 };
 
@@ -187,6 +188,8 @@ async function settledKalshiDay(seriesTicker: string, date: string) {
 
   const band = bandFromMarket(winner);
   const realizedHigh =
+    numberOrNull(winner.expiration_value) ??
+    numberOrNull(markets.find((market) => market.expiration_value !== null && market.expiration_value !== undefined)?.expiration_value) ??
     numberOrNull(winner.settlement_value) ??
     numberOrNull(markets.find((market) => market.settlement_value !== null && market.settlement_value !== undefined)?.settlement_value);
 
