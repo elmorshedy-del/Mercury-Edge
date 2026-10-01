@@ -42,6 +42,11 @@ type ForecastBaseline = {
   points: ForecastPoint[];
 };
 
+type ForecastCurrent = ForecastBaseline & {
+  allPoints?: ForecastPoint[];
+  dailyHighs?: Record<string, number | null>;
+};
+
 type Station = {
   stid: string;
   city: string;
@@ -56,6 +61,7 @@ type Station = {
   daily: WeatherRow[];
   hfAvailable: boolean;
   forecastBaseline: ForecastBaseline | null;
+  forecastCurrent: ForecastCurrent | null;
 };
 
 type DashboardData = {
@@ -351,28 +357,32 @@ function diagnoseMechanism(residuals: ResidualPoint[], baselinePoints: LocalPoin
 }
 
 function buildTrajectory(station: Station) {
-  const baseline = station.forecastBaseline;
-  if (!baseline?.points?.length || !station.timezone) return null;
+  const frozen = station.forecastBaseline;
+  const current = station.forecastCurrent?.points?.length ? station.forecastCurrent : frozen;
+  if (!frozen?.points?.length || !current?.points?.length || !station.timezone) return null;
 
-  const baselinePoints = baseline.points
+  const toLocalPoints = (points: ForecastPoint[]) => points
     .map((point) => {
       const minute = minuteOfDay(point.time, station.timezone);
       return minute === null ? null : { minute, temp: point.temp };
     })
     .filter((point): point is LocalPoint => point !== null)
     .sort((a, b) => a.minute - b.minute);
-  if (baselinePoints.length < 2) return null;
+
+  const frozenPoints = toLocalPoints(frozen.points);
+  const currentPoints = toLocalPoints(current.points);
+  if (frozenPoints.length < 2 || currentPoints.length < 2) return null;
 
   const routineReports = station.official.filter((row) => reportType(row) === "METAR");
   const routineSource = routineReports.length ? routineReports : station.official;
   const routineMinute = inferRoutineMinute(routineSource, station.timezone);
   const todayOfficial = station.official
-    .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === baseline.localDate)
+    .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === frozen.localDate)
     .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
     .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
     .sort((a, b) => a.minute - b.minute);
   const todayRoutine = routineSource
-    .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === baseline.localDate)
+    .filter((row) => row.temp !== null && localDateLabel(row.time, station.timezone) === frozen.localDate)
     .map((row) => ({ row, minute: minuteOfDay(row.time, station.timezone) }))
     .filter((item): item is { row: WeatherRow; minute: number } => item.minute !== null)
     .sort((a, b) => a.minute - b.minute);
@@ -381,9 +391,13 @@ function buildTrajectory(station: Station) {
   const observedPoints: ObservedPoint[] = routineAnchors.map((item) => ({ minute: item.minute, temp: item.row.temp as number, time: item.row.time }));
   const precisePoints: ObservedPoint[] = todayOfficial.map((item) => ({ minute: item.minute, temp: item.row.temp as number, time: item.row.time }));
 
+  // The adaptive lane is anchored to the latest TWC hourly path, not the frozen
+  // pre-day path. TWC's live hourly endpoint usually starts near the current
+  // hour, so only observations within the interpolation/extrapolation window
+  // contribute to the live residual state.
   const residuals = routineAnchors
     .map((item) => {
-      const base = baselineAt(baselinePoints, item.minute);
+      const base = baselineAt(currentPoints, item.minute);
       if (base === null || item.row.temp === null) return null;
       return {
         minute: item.minute,
@@ -391,23 +405,24 @@ function buildTrajectory(station: Station) {
         residual: item.row.temp - base,
         time: item.row.time,
         row: item.row,
-        forecast: nearestForecastPoint(baseline.points, item.minute, station.timezone),
+        forecast: nearestForecastPoint(current.points, item.minute, station.timezone),
       };
     })
     .filter((point): point is ResidualPoint => point !== null);
 
-  const originalPeak = baselinePoints.reduce((best, point) => (point.temp > best.temp ? point : best), baselinePoints[0]);
+  const frozenHourlyPeak = frozenPoints.reduce((best, point) => (point.temp > best.temp ? point : best), frozenPoints[0]);
+  const currentHourlyPeak = currentPoints.reduce((best, point) => (point.temp > best.temp ? point : best), currentPoints[0]);
   const actualPeak = precisePoints.length ? precisePoints.reduce((best, point) => (point.temp > best.temp ? point : best), precisePoints[0]) : null;
-  const sixHourRows = station.sixHour.filter((row) => row.high6 !== null && localDateLabel(row.time, station.timezone) === baseline.localDate);
+  const sixHourRows = station.sixHour.filter((row) => row.high6 !== null && localDateLabel(row.time, station.timezone) === frozen.localDate);
   const sixHourPeak = sixHourRows.length ? sixHourRows.reduce((best, row) => ((row.high6 as number) > (best.high6 as number) ? row : best), sixHourRows[0]) : null;
-  const mechanism = diagnoseMechanism(residuals, baselinePoints, baseline.source === "twc" ? "TWC" : "NWS");
+  const mechanism = diagnoseMechanism(residuals, currentPoints, "latest TWC");
 
   if (!residuals.length) {
     return {
-      baselinePoints, observedPoints, residuals: [] as ResidualPoint[], projected: [] as ProjectedPoint[],
+      frozenPoints, currentPoints, observedPoints, residuals: [] as ResidualPoint[], projected: [] as ProjectedPoint[],
       latestResidual: null as number | null, persistence: null as number | null, biasState: null as number | null,
       peak: actualPeak ? { minute: actualPeak.minute, temp: actualPeak.temp } : null,
-      originalPeak, actualPeak, sixHourPeak, routineMinute, mechanism,
+      frozenHourlyPeak, currentHourlyPeak, actualPeak, sixHourPeak, routineMinute, mechanism,
     };
   }
 
@@ -415,7 +430,7 @@ function buildTrajectory(station: Station) {
   const persistence = estimatePersistence(residuals);
   const state = kalmanBiasState(residuals);
   const projected: ProjectedPoint[] = [];
-  for (const basePoint of baselinePoints) {
+  for (const basePoint of currentPoints) {
     if (basePoint.minute <= latest.minute) continue;
     const hours = (basePoint.minute - latest.minute) / 60;
     const correction = state.bias * Math.pow(persistence, hours);
@@ -429,9 +444,9 @@ function buildTrajectory(station: Station) {
   const peak = candidates.length ? candidates.reduce((best, point) => (point.temp > best.temp ? point : best), candidates[0]) : null;
 
   return {
-    baselinePoints, observedPoints, residuals, projected,
+    frozenPoints, currentPoints, observedPoints, residuals, projected,
     latestResidual: latest.residual, persistence, biasState: state.bias,
-    peak, originalPeak, actualPeak, sixHourPeak, routineMinute, mechanism,
+    peak, frozenHourlyPeak, currentHourlyPeak, actualPeak, sixHourPeak, routineMinute, mechanism,
   };
 }
 
@@ -447,14 +462,23 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
   const model = useMemo(() => buildTrajectory(station), [station]);
   if (!model || !station.forecastBaseline) return null;
 
-  const sourceShort = station.forecastBaseline.source === "twc" ? "TWC" : "NWS";
-  const sourceLong = station.forecastBaseline.source === "twc" ? "The Weather Company" : "National Weather Service";
+  const frozen = station.forecastBaseline;
+  const current = station.forecastCurrent?.points?.length ? station.forecastCurrent : frozen;
+  const sourceShort = frozen.source === "twc" ? "TWC" : "NWS";
 
-  const daytimeBaseline = model.baselinePoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
-  if (daytimeBaseline.length < 2) return null;
+  const daytimeFrozen = model.frozenPoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
+  const daytimeCurrent = model.currentPoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
+  if (daytimeFrozen.length < 2 || daytimeCurrent.length < 2) return null;
   const plottedObserved = model.observedPoints.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
   const plottedProjected = model.projected.filter((point) => point.minute >= 6 * 60 && point.minute <= 22 * 60);
-  const allTemps = [...daytimeBaseline.map((point) => point.temp), ...plottedObserved.map((point) => point.temp), ...plottedProjected.map((point) => point.temp)];
+  const allTemps = [
+    ...daytimeFrozen.map((point) => point.temp),
+    ...daytimeCurrent.map((point) => point.temp),
+    ...plottedObserved.map((point) => point.temp),
+    ...plottedProjected.map((point) => point.temp),
+    ...(frozen.forecastHigh === null ? [] : [frozen.forecastHigh]),
+    ...(current.forecastHigh === null ? [] : [current.forecastHigh]),
+  ];
   const yMin = Math.floor(Math.min(...allTemps) - 2);
   const yMax = Math.ceil(Math.max(...allTemps) + 2);
   const xMin = 6 * 60;
@@ -477,28 +501,44 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       <div className={styles.sectionTitle}>
         <div>
           <span>Daily trajectory</span>
-          <h3>{sourceShort} forecast vs decoded hourly METAR</h3>
+          <h3>Frozen {sourceShort} vs latest {sourceShort} vs METAR vs adaptive</h3>
         </div>
-        <small>{sourceShort} baseline captured {shortTimeLabel(station.forecastBaseline.capturedAt, station.timezone)}</small>
+        <small>Adaptive future uses the latest TWC path + live METAR bias</small>
       </div>
 
       <div className={styles.trajectoryStats}>
-        <div><span>{sourceShort} calendar-day high</span><b>{station.forecastBaseline.forecastHigh !== null ? `${station.forecastBaseline.forecastHigh.toFixed(0)}°F` : model.originalPeak ? `${model.originalPeak.temp.toFixed(1)}° hourly peak` : "—"}</b></div>
-        <div><span>METAR max</span><b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b></div>
-        <div><span>6h max revealed</span><b>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `${model.sixHourPeak.high6.toFixed(0)}° · ${timeLabel(model.sixHourPeak.time, station.timezone)}` : "—"}</b></div>
-        <div><span>Adaptive hourly max</span><b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b></div>
+        <div>
+          <span>Frozen TWC calendar high</span>
+          <b>{frozen.forecastHigh !== null ? `${frozen.forecastHigh.toFixed(0)}°F` : "—"}</b>
+          <small>{shortTimeLabel(frozen.capturedAt, station.timezone)} · hourly path {model.frozenHourlyPeak.temp.toFixed(0)}°</small>
+        </div>
+        <div>
+          <span>Latest TWC calendar high</span>
+          <b>{current.forecastHigh !== null ? `${current.forecastHigh.toFixed(0)}°F` : "—"}</b>
+          <small>{shortTimeLabel(current.capturedAt, station.timezone)} · hourly path {model.currentHourlyPeak.temp.toFixed(0)}°</small>
+        </div>
+        <div>
+          <span>METAR max so far</span>
+          <b>{model.actualPeak ? `${model.actualPeak.temp.toFixed(0)}° · ${timeLabel(model.actualPeak.time, station.timezone)}` : "—"}</b>
+          <small>{model.sixHourPeak?.high6 !== null && model.sixHourPeak?.high6 !== undefined ? `6h max report ${model.sixHourPeak.high6.toFixed(0)}°` : "No 6h max yet"}</small>
+        </div>
+        <div>
+          <span>Adaptive hourly max</span>
+          <b>{model.peak ? `${model.peak.temp.toFixed(1)}° · ${clockLabel(model.peak.minute)}` : "—"}</b>
+          <small>{model.latestResidual === null ? "Waiting for live TWC/METAR overlap" : `latest METAR miss ${model.latestResidual >= 0 ? "+" : ""}${model.latestResidual.toFixed(1)}°`}</small>
+        </div>
       </div>
 
       <div className={styles.trajectoryLegend}>
-        <span><i className={styles.legendOriginal} />Original {sourceShort} hourly path</span>
-        <span><i className={styles.legendObserved} />Hourly METAR (decoded whole °F)</span>
-        <span><i className={styles.legendAdaptive} />Kalman adaptive future</span>
-        {model.latestResidual !== null && <span>Latest miss {model.latestResidual >= 0 ? "+" : ""}{model.latestResidual.toFixed(1)}°F</span>}
+        <span><i className={styles.legendFrozen} />Frozen TWC · {shortTimeLabel(frozen.capturedAt, station.timezone)}</span>
+        <span><i className={styles.legendCurrent} />Latest TWC · {shortTimeLabel(current.capturedAt, station.timezone)}</span>
+        <span><i className={styles.legendObserved} />METAR observations</span>
+        <span><i className={styles.legendAdaptive} />Adaptive = latest TWC + METAR bias</span>
         <span>{model.mechanism.label}</span>
       </div>
 
       <div className={styles.chartScroll}>
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} ${sourceShort} hourly forecast, decoded hourly METAR observations, and adaptive future trajectory`}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${station.city} frozen and latest TWC hourly forecasts, METAR observations, and adaptive future trajectory`}>
           {[yMin, middleTick, yMax].map((tick) => (
             <g key={tick}>
               <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} className={styles.gridLine} />
@@ -506,7 +546,8 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
             </g>
           ))}
           {ticks.map((hour) => <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={styles.axisText}>{hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}</text>)}
-          <polyline points={line(daytimeBaseline)} className={styles.originalLine} />
+          <polyline points={line(daytimeFrozen)} className={styles.frozenLine} />
+          <polyline points={line(daytimeCurrent)} className={styles.currentLine} />
           {plottedObserved.length > 1 && <polyline points={line(plottedObserved)} className={styles.observedLine} />}
           {adaptive.length > 1 && <polyline points={line(adaptive)} className={styles.adaptiveLine} />}
           {plottedObserved.map((point) => <circle key={`o-${point.minute}`} cx={x(point.minute)} cy={y(point.temp)} r="4" className={styles.observedDot} />)}
@@ -515,7 +556,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} The blue path is the {sourceLong} hourly shape. The high card uses the provider's daily-high field when available; the adaptive line numerically applies only the sequential Kalman bias state with observed temperature-residual persistence.
+        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} Frozen TWC is preserved as the pre-day study benchmark. Latest TWC is the provider's newest hourly curve. METAR is observed reality. The adaptive line applies the live METAR residual to the latest TWC future; it does not alter or backfill either TWC curve. Calendar-day highs are shown separately because TWC's daily-high product can differ from the maximum value in its hourly path.
       </p>
     </section>
   );
