@@ -20,6 +20,7 @@ type KalshiMarket = {
   yes_ask_dollars?: string;
   last_price_dollars?: string;
   result?: string;
+  expiration_value?: number | string | null;
   settlement_value?: number | string | null;
 };
 
@@ -221,7 +222,9 @@ export async function GET(request: NextRequest) {
 
     const winningMarket = event.markets.find((market) => String(market.result ?? "").toLowerCase() === "yes") ?? null;
     const winningBand = winningMarket ? bandFromMarket(winningMarket) : null;
-    const settlementValue = winningMarket ? numberOrNull(winningMarket.settlement_value) : null;
+    const settlementValue = winningMarket
+      ? numberOrNull(winningMarket.expiration_value) ?? numberOrNull(winningMarket.settlement_value)
+      : null;
 
     const marketCenter = buildMarketCenter(marketSeries);
     const latestMarkets = marketSeries.map((market) => {
