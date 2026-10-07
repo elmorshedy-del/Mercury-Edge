@@ -116,8 +116,8 @@ export function WeatherStudyTable() {
           <h2>TWC forecast high vs realized daily high</h2>
           <p>
             {data?.dates?.length
-              ? `${data.dates.map(shortDate).join("–")} · rolling three completed market days; frozen forecast on the left, realized settlement high on the right, forecast error in parentheses.`
-              : "Rolling three completed market days · frozen forecast on the left, realized settlement high on the right, forecast error in parentheses."}
+              ? `${shortDate(data.dates[0])}–${shortDate(data.dates[data.dates.length - 1])} · all ${data.dates.length} completed recorded market days; frozen forecast on the left, realized settlement high on the right, forecast error in parentheses.`
+              : "All completed recorded market days · frozen forecast on the left, realized settlement high on the right, forecast error in parentheses."}
           </p>
         </div>
         <div className={styles.legend}><b>MAE</b><span>Mean absolute error</span></div>
@@ -134,7 +134,7 @@ export function WeatherStudyTable() {
                 <tr>
                   <th>City</th>
                   {data.dates.map((date) => <th key={date}>{shortDate(date)}</th>)}
-                  <th>3-day MAE</th>
+                  <th>Recorded-day MAE</th>
                   <th>Winning-bucket hits</th>
                 </tr>
               </thead>
@@ -155,7 +155,7 @@ export function WeatherStudyTable() {
           </div>
 
           <p className={styles.note}>
-            Error sign = TWC frozen calendar-day high − realized Kalshi/TWC settlement high. “Winning-bucket hit” means the frozen TWC high itself falls inside the bucket that settled YES. The dates roll forward automatically after the Pacific calendar day closes; incomplete or unavailable cells are shown explicitly instead of being filled from a later forecast.
+            Error sign = TWC frozen calendar-day high − realized Kalshi/TWC settlement high. “Winning-bucket hit” means the frozen TWC high itself falls inside the bucket that settled YES. The study starts at Mercury’s first recorded TWC baseline and keeps every completed day permanently. New dates append automatically after the Pacific calendar day closes; incomplete or unavailable cells are shown explicitly instead of being filled from a later forecast.
           </p>
         </>
       )}
