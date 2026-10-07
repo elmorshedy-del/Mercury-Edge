@@ -69,12 +69,30 @@ function addDays(date: string, delta: number) {
   return value.toISOString().slice(0, 10);
 }
 
-function completedDates() {
+async function completedDates() {
   // Pacific time is the latest civil day among the five dashboard cities.
   // Using its yesterday guarantees every displayed market day is complete.
   const pacificToday = dateInZone(new Date(), "America/Los_Angeles");
   const latest = addDays(pacificToday, -1);
-  return [addDays(latest, -2), addDays(latest, -1), latest];
+
+  // The study is cumulative: start at the first day for which Mercury began
+  // recording a frozen TWC trajectory baseline, then retain every completed
+  // calendar day forever. Missing station/day cells remain explicit in the UI.
+  const firstRecorded = await query<{ first_date: string | null }>(
+    `SELECT MIN(local_date)::text AS first_date
+     FROM weather_trajectory_baselines_v2
+     WHERE source = 'twc'
+       AND stid = ANY($1::text[])
+       AND local_date <= $2::date`,
+    [STUDY_STATIONS.map((station) => station.stid), latest],
+  );
+
+  const first = firstRecorded.rows[0]?.first_date ?? latest;
+  const dates: string[] = [];
+  for (let date = first; date <= latest; date = addDays(date, 1)) {
+    dates.push(date);
+  }
+  return dates;
 }
 
 function exactEventTicker(seriesTicker: string, date: string) {
@@ -207,7 +225,7 @@ export async function GET() {
   }
 
   try {
-    const dates = completedDates();
+    const dates = await completedDates();
     const rows = await Promise.all(STUDY_STATIONS.map(async ({ stid, label }) => {
       const config = STATIONS.find((station) => station.station === stid);
       if (!config) throw new Error(`Station config missing for ${stid}`);
