@@ -24,9 +24,22 @@ export type NowcastModel = {
   publish_lag_min: number;
   nbm_lag_min: number;
   next_metar: ExportedBooster;
-  hidden_max: ExportedBooster;
+  hidden_max: ExportedBooster & { platt_ge1?: [number, number] | null };
   final_high: ExportedBooster & { anchor: string };
+  airports?: { stations: string[]; hf_latency_min: number; metar_lag_min: number };
 };
+
+/** Airport 5-minute HF report (api.weather.gov / MADIS): whole degrees C converted to F. */
+export type AirportHfObservation = {
+  station: string;
+  time: number;
+  tempF: number | null;
+  dirDeg: number | null;
+  speedKt: number | null;
+};
+
+/** Airport routine/special METAR with its T-group whole-F temperature. */
+export type AirportMetar = { station: string; valid: number; temp: number };
 
 /** One raw NYS Mesonet / Micronet observation (temperatures already in Fahrenheit). */
 export type MesonetObservation = {
@@ -253,12 +266,156 @@ export function climateDayStart(tau: number) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Airports west/south of the park (EWR, CDW, JRB) - mirrors research/manh_knyc/airports.py
+// ------------------------------------------------------------------------------------------
+
+type AirportSeries = {
+  temp: Float64Array; // forward-filled up to 3 stamps (pandas ffill(limit=3))
+  rawTemp: Float64Array;
+  u: Float64Array; // rolling(3, min_periods=1) mean of wind components (knots)
+  v: Float64Array;
+  metars: AirportMetar[]; // sorted by valid
+};
+
+const AIRPORT_TEMP_RANGE_F = [-40, 120] as const; // drops the M61/M61 (-61 C) missing-data sentinel
+const AIRPORT_METAR_MAX_AGE = [90 * MINUTE, 180 * MINUTE] as const; // last / previous METAR freshness
+
+export type AirportData = { start: number; length: number; latencyMs: number; metarLagMs: number; stations: Record<string, AirportSeries> };
+
+export function buildAirportData(
+  model: NowcastModel,
+  hf: AirportHfObservation[],
+  metars: AirportMetar[],
+  start: number,
+  end: number,
+): AirportData | null {
+  if (!model.airports) return null;
+  const length = Math.floor((end - start) / STEP_MS) + 1;
+  const stations: Record<string, AirportSeries> = {};
+  for (const code of model.airports.stations) {
+    const raw = new Float64Array(length).fill(nan);
+    const uRaw = new Float64Array(length).fill(nan);
+    const vRaw = new Float64Array(length).fill(nan);
+    for (const obs of hf) {
+      if (obs.station !== code) continue;
+      const slot = (obs.time - start) / STEP_MS;
+      if (!Number.isInteger(slot) || slot < 0 || slot >= length) continue;
+      if (typeof obs.tempF === "number" && obs.tempF >= AIRPORT_TEMP_RANGE_F[0] && obs.tempF <= AIRPORT_TEMP_RANGE_F[1]) {
+        raw[slot] = obs.tempF;
+      }
+      if (typeof obs.dirDeg === "number" && typeof obs.speedKt === "number") {
+        const rad = (obs.dirDeg * Math.PI) / 180;
+        uRaw[slot] = -obs.speedKt * Math.sin(rad);
+        vRaw[slot] = -obs.speedKt * Math.cos(rad);
+      }
+    }
+    const temp = Float64Array.from(raw);
+    let lastValue = nan;
+    let gap = 0;
+    for (let i = 0; i < length; i += 1) {
+      if (isNum(raw[i])) {
+        lastValue = raw[i];
+        gap = 0;
+      } else {
+        gap += 1;
+        if (isNum(lastValue) && gap <= 3) temp[i] = lastValue;
+      }
+    }
+    const roll = (series: Float64Array) =>
+      series.map((_, i) => {
+        let sum = 0;
+        let count = 0;
+        for (let k = Math.max(0, i - 2); k <= i; k += 1) {
+          if (isNum(series[k])) {
+            sum += series[k];
+            count += 1;
+          }
+        }
+        return count ? sum / count : nan;
+      });
+    stations[code] = {
+      temp,
+      rawTemp: raw,
+      u: roll(uRaw),
+      v: roll(vRaw),
+      metars: metars
+        .filter((m) => m.station === code && m.temp >= AIRPORT_TEMP_RANGE_F[0] && m.temp <= AIRPORT_TEMP_RANGE_F[1])
+        .sort((a, b) => a.valid - b.valid),
+    };
+  }
+  return {
+    start,
+    length,
+    latencyMs: model.airports.hf_latency_min * MINUTE,
+    metarLagMs: model.airports.metar_lag_min * MINUTE,
+    stations,
+  };
+}
+
+function airportAt(air: AirportData, series: Float64Array, time: number) {
+  const slot = (time - air.start) / STEP_MS;
+  return Number.isInteger(slot) && slot >= 0 && slot < air.length ? series[slot] : nan;
+}
+
+/** ref = last KNYC METAR (next-METAR model) or the published max (daily models). */
+export function airportFeatures(air: AirportData | null, codes: string[], tau: number, ref: number, cdate?: string) {
+  const out: Record<string, number> = {};
+  const lvls: number[] = [];
+  const d30s: number[] = [];
+  for (const code of codes) {
+    const st = air?.stations[code];
+    const avail = Math.floor((tau - (air?.latencyMs ?? 0)) / STEP_MS) * STEP_MS;
+    const T = (time: number) => (st && air ? airportAt(air, st.temp, time) : nan);
+    const cur = T(avail);
+    out[`${code}_hf_lvl`] = cur - ref;
+    out[`${code}_hf_d30`] = cur - T(avail - 30 * MINUTE);
+    out[`${code}_hf_d60`] = cur - T(avail - HOUR);
+    out[`${code}_u`] = st && air ? airportAt(air, st.u, avail) : nan;
+    out[`${code}_v`] = st && air ? airportAt(air, st.v, avail) : nan;
+    const visible = st && air ? st.metars.filter((m) => m.valid + air.metarLagMs <= tau) : [];
+    const fresh = (m: AirportMetar | undefined, maxAge: number) => (m && tau - m.valid <= maxAge ? m.temp : nan);
+    const last = fresh(visible.at(-1), AIRPORT_METAR_MAX_AGE[0]);
+    const prev = fresh(visible.at(-2), AIRPORT_METAR_MAX_AGE[1]);
+    out[`${code}_met_lvl`] = last - ref;
+    out[`${code}_met_d60`] = last - prev;
+    if (cdate !== undefined) {
+      let dayMax = -Infinity;
+      if (st && air) {
+        for (let slot = 0; slot < air.length; slot += 1) {
+          const stamp = air.start + slot * STEP_MS;
+          const value = st.rawTemp[slot];
+          if (isNum(value) && stamp + air.latencyMs <= tau && climateDate(stamp) === cdate) dayMax = Math.max(dayMax, value);
+        }
+        for (const m of visible) if (climateDate(m.valid) === cdate) dayMax = Math.max(dayMax, m.temp);
+      }
+      out[`${code}_daymax_lvl`] = isNum(dayMax) ? dayMax - ref : nan;
+    }
+    lvls.push(out[`${code}_hf_lvl`]);
+    d30s.push(out[`${code}_hf_d30`]);
+  }
+  const meanFinite = (values: number[]) => {
+    const finite = values.filter(isNum);
+    return finite.length ? finite.reduce((a, b) => a + b, 0) / finite.length : nan;
+  };
+  out.air_hf_lvl = meanFinite(lvls);
+  out.air_hf_d30 = meanFinite(d30s);
+  return out;
+}
+
+// ------------------------------------------------------------------------------------------
 // Model A: next routine METAR
 // ------------------------------------------------------------------------------------------
 
 export type NextMetarFeatures = Record<string, number>;
 
-export function nextMetarFeatures(model: NowcastModel, grid: Grid, reports: KnycReport[], t0: number, tau: number) {
+export function nextMetarFeatures(
+  model: NowcastModel,
+  grid: Grid,
+  reports: KnycReport[],
+  t0: number,
+  tau: number,
+  air: AirportData | null = null,
+) {
   const routine = new Map(reports.filter((report) => report.routine).map((report) => [report.valid, report.temp]));
   const y0 = routine.get(t0);
   if (y0 === undefined) return null;
@@ -320,6 +477,7 @@ export function nextMetarFeatures(model: NowcastModel, grid: Grid, reports: Knyc
     features[`${station}_dm`] = at(series, grid, tau) - at(series, grid, t0 - MINUTE);
     features[`${station}_off`] = at(series, grid, t0 - MINUTE) - y0;
   }
+  if (model.airports) Object.assign(features, airportFeatures(air, model.airports.stations, tau, y0));
   return features;
 }
 
@@ -393,7 +551,14 @@ function pathFeatures(
 
 export type DayFeatures = Record<string, number>;
 
-export function dayFeatures(model: NowcastModel, grid: Grid, reports: KnycReport[], nbm: NbmRun[], tau: number) {
+export function dayFeatures(
+  model: NowcastModel,
+  grid: Grid,
+  reports: KnycReport[],
+  nbm: NbmRun[],
+  tau: number,
+  air: AirportData | null = null,
+) {
   const dayStart = climateDayStart(tau);
   const cdate = climateDate(dayStart);
   const lag = model.publish_lag_min * MINUTE;
@@ -448,6 +613,7 @@ export function dayFeatures(model: NowcastModel, grid: Grid, reports: KnycReport
       features[`${prefix}gap_now_b${b}`] = features[`${prefix}imp_now_b${b}`] - knownMax;
     }
   }
+  if (model.airports) Object.assign(features, airportFeatures(air, model.airports.stations, tau, knownMax, cdate));
   return { features, knownMax, knownMetar, txn, nbmRun: nbmRun ?? null, cdate, dayStart };
 }
 
@@ -469,7 +635,15 @@ export function predictNextMetar(model: NowcastModel, features: NextMetarFeature
 
 export function predictHiddenMax(model: NowcastModel, features: DayFeatures) {
   const booster = model.hidden_max;
-  return predictProba(booster, featureVector(booster, features));
+  return applyPlatt(predictProba(booster, featureVector(booster, features)), booster.platt_ge1 ?? null);
+}
+
+/** Rescale [P(+0), P(+1), P(+2), P(+3+)] so P(>= +1) follows the exported Platt correction. */
+export function applyPlatt(probs: number[], platt: [number, number] | null): number[] {
+  if (!platt) return probs;
+  const above = Math.min(Math.max(1 - probs[0], 1e-6), 1 - 1e-6);
+  const corrected = 1 / (1 + Math.exp(-(platt[0] * Math.log(above / (1 - above)) + platt[1])));
+  return [1 - corrected, ...probs.slice(1).map((p) => (p * corrected) / above)];
 }
 
 /** Final CLI high: the model predicts how many degrees the CLI high ends above the published max. */

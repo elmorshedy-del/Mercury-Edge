@@ -4,11 +4,13 @@ import { NextResponse } from "next/server";
 import { AWC_BASE_URL, IEM_BASE_URL, KALSHI_BASE_URL } from "@/lib/config";
 import { fetchJson, fetchText } from "@/lib/http";
 import { marketToBand, type KalshiEventDetail } from "@/lib/sources/kalshi";
+import { getAirportHf, getAirportMetars } from "@/lib/sources/airport-feeds";
 import { getNysmTimeseries } from "@/lib/sources/nysm";
 import {
   MINUTE,
   STEP_MS,
   blendChange,
+  buildAirportData,
   buildGrid,
   climateDate,
   dayFeatures,
@@ -18,6 +20,8 @@ import {
   predictFinalHigh,
   predictHiddenMax,
   predictNextMetar,
+  type AirportHfObservation,
+  type AirportMetar,
   type Distribution,
   type Grid,
   type KnycReport,
@@ -152,12 +156,18 @@ export async function GET() {
     const start = end - LOOKBACK;
     const nysmStations = model.stations.filter((station) => model.station_datasets[station] === "nysm");
     const nycStations = model.stations.filter((station) => model.station_datasets[station] === "nyc");
-    const [nysm, nyc, reports, nbm] = await Promise.all([
+    const airportCodes = model.airports?.stations ?? [];
+    const [nysm, nyc, reports, nbm, airportHf, airportMetars] = await Promise.all([
       getNysmTimeseries("nysm", nysmStations, MANH_VARS, start, end),
       getNysmTimeseries("nyc", nycStations, ["tair"], start, end).catch(() => [] as MesonetObservation[]),
       getKnycReports(),
       getNbmRuns(now).catch(() => [] as NbmRun[]),
+      airportCodes.length ? getAirportHf(airportCodes, start) : Promise.resolve([] as AirportHfObservation[]),
+      airportCodes.length
+        ? getAirportMetars(airportCodes, 32).catch(() => [] as AirportMetar[])
+        : Promise.resolve([] as AirportMetar[]),
     ]);
+    const air = buildAirportData(model, airportHf, airportMetars, start, end);
     const observations = [...nysm, ...nyc].map((obs) => (obs.station === "MANH" ? obs : { ...obs, srad: null }));
     const grid = buildGrid(observations, model.stations, start, end);
     const tau = latestGridTime(grid);
@@ -173,6 +183,15 @@ export async function GET() {
         if (Number.isFinite(series[slot])) latest = { time: grid.start + slot * STEP_MS, temp: series[slot] };
       }
       return { station, dataset: model.station_datasets[station], weight: model.blend_weights[station], latest };
+    });
+    const airportsNow = airportCodes.map((code) => {
+      const hf = airportHf.filter((obs) => obs.station === code && obs.tempF !== null).sort((a, b) => a.time - b.time).at(-1);
+      const metar = airportMetars.filter((obs) => obs.station === code).sort((a, b) => a.valid - b.valid).at(-1);
+      return {
+        station: code,
+        hf: hf ? { time: hf.time, temp: hf.tempF } : null,
+        metar: metar ? { time: metar.valid, temp: metar.temp } : null,
+      };
     });
 
     // ---- next routine METAR ----
@@ -190,7 +209,7 @@ export async function GET() {
       } else if (tau > t0 + 59 * MINUTE) {
         nextMetar = { status: "waiting", reason: "Next METAR is due; waiting for it to publish", dueAt };
       } else {
-        const features = nextMetarFeatures(model, grid, reports, t0, tau);
+        const features = nextMetarFeatures(model, grid, reports, t0, tau, air);
         if (!features) {
           nextMetar = { status: "unavailable", reason: "Feature window incomplete", dueAt };
         } else {
@@ -223,7 +242,7 @@ export async function GET() {
       status: "unavailable",
       reason: stale ? staleReason : "No KNYC report yet in this climate day",
     };
-    const dayResult = stale ? null : dayFeatures(model, grid, reports, nbm, tau);
+    const dayResult = stale ? null : dayFeatures(model, grid, reports, nbm, tau, air);
     if (dayResult) {
       const hidden = predictHiddenMax(model, dayResult.features);
       const finalDist = predictFinalHigh(model, dayResult.features, dayResult.knownMax).filter((item) => item.p >= 0.0005);
@@ -265,6 +284,7 @@ export async function GET() {
       tau,
       model: { version: model.version, trainedThrough: model.trained_through, stations: model.stations },
       stations: stationsNow,
+      airports: airportsNow,
       lastMetar: lastRoutine ? { valid: lastRoutine.valid, temp: lastRoutine.temp, raw: lastRoutine.raw, receivedAt: lastRoutine.receivedAt } : null,
       nextMetar,
       day,

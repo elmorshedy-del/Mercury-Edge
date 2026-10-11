@@ -3,8 +3,9 @@
 Kalshi and Polymarket NYC high-temperature markets settle on the NWS Daily Climate Report
 (CLI) for Central Park (KNYC). KNYC publishes only hourly METARs at :51, so for 59 minutes of
 every hour the market is "dark". The NYS Mesonet Manhattan site (MANH) reports every 5 minutes.
-This study asks how much of KNYC's hidden state can be recovered from MANH and nearby Mesonet
-sites, and turns the answer into a live dashboard panel (Weather Lab → NYC → Live).
+This study asks how much of KNYC's hidden state can be recovered from MANH, nearby Mesonet
+sites and the airports west and south of the park (Newark, Caldwell, Wall Street), and turns the
+answer into a live dashboard panel (Weather Lab → NYC → Live).
 
 All performance numbers are **out-of-sample**: models are trained on 2021–2024 and scored on
 every decision point from 1 Jan 2025 to 8 Oct 2026, which they never saw. Each Mesonet model is
@@ -81,6 +82,44 @@ log loss from 1.1805 to 1.185 (no gain, even with zero delay and full 1-minute r
 changed the daily-high models by noise-level amounts (hidden-max AUC 0.827 → 0.831). LGA is
 therefore **not** in the live model. `research/manh_knyc/lga_check.py` reruns the test.
 
+### Newark, Caldwell and Wall Street (west and south) — in the model
+
+Caldwell (KCDW, ≈30 km WNW) and Newark (KEWR, ≈15 km WSW) sit *upstream* in our usual westerly
+flow; Wall Street (KJRB, downtown heliport) is ≈10 km south. Using their 1-minute histories, in
+west/northwest wind **Caldwell's temperature changes lead Central Park's by about 30 minutes**
+(correlation of KNYC's next-15-minute change with Caldwell's change ending 15 minutes earlier:
+0.35, versus 0.24 for the simultaneous change). Newark leads by roughly 15 minutes (0.31 peak).
+In southerly or easterly flow neither leads.
+
+How they are used live (`research/manh_knyc/airports.py`, mirrored in TypeScript):
+
+| Feed | Resolution | When it can be used |
+|---|---|---|
+| 5-minute ASOS reports (api.weather.gov; identical to the IEM MADIS archive reading-for-reading) | whole °C (1.8 °F steps) + wind | 25 minutes after the stamp (observed delay 12–30 min) |
+| Routine/special METARs (EWR :51, CDW :53, JRB :56) | whole °F via the T-group | 3 minutes after the observation |
+
+Features: each airport's level relative to the last KNYC METAR (or the published max), its 30-
+and 60-minute changes, wind components, its latest METAR level and hourly change, and (for the
+daily models) its highest reading of the climate day so far. Readings outside −40…120 °F (the
+`M61/M61` missing-data sentinel) are dropped, and METARs older than 90 minutes (180 for the
+previous one) are ignored — Caldwell and Wall Street both have multi-day outages in the archive.
+
+Out-of-sample effect of adding the three airports on top of the six Mesonet sites (95% intervals
+from resampling whole days, so correlated hours within a day do not overstate certainty):
+
+| Model | Without airports | With airports | Log-loss change (95% CI) |
+|---|---|---|---|
+| Next METAR | 50.7% exact, log loss 1.180 | **51.4%**, **1.168** | −0.013 (−0.016 … −0.009) |
+| Hidden max | AUC 0.827, log loss 0.784 | **AUC 0.848**, **0.769** | −0.015 (−0.028 … −0.001) |
+| Final high | 47.8% exact, log loss 1.413 | **48.6%**, **1.395** | −0.018 (−0.032 … −0.005) |
+
+All three improvements are statistically clear, if modest. Caldwell carries most of the
+next-METAR gain (its 30-minute lead in westerly flow survives the feed delay), Newark adds some,
+and Wall Street adds nothing to the next METAR but contributes to the daily models through its
+precise :56 METAR and its daily maximum. With zero feed delay the next-METAR gain would roughly
+double (log loss 1.156 vs 1.168 live; `research/manh_knyc/results/airports_check.txt`), so a faster source for the 5-minute airport data
+would be worth having. `research/manh_knyc/airports_check.py` reruns these comparisons.
+
 ### The NYS Mesonet "forecast high"
 
 The forecast shown on nysmesonet.org is not a Mesonet product. The site calls the **NWS point
@@ -110,15 +149,22 @@ turn this into calibrated probabilities:
 | Final high | Where will the CLI high finish? | P(published max + 0 … +20 °F) |
 
 Inputs at each 5-minute decision time use only data that existed then: KNYC reports 3 minutes
-after their :51 stamp, Mesonet values at their stamp (they arrive ≈1m50s later), and NBM runs
-75 minutes after their run time. Path features reconstruct the implied KNYC curve between every
+after their :51 stamp, Mesonet values at their stamp (they arrive ≈1m50s later), airport
+5-minute reports 25 minutes after their stamp and airport METARs 3 minutes after theirs, and NBM
+runs 75 minutes after their run time. Path features reconstruct the implied KNYC curve between every
 pair of hourlies (straight line between METARs plus the blend's deviation from its own straight
 line), so a spike that came and went between two METARs leaves a trace.
 
 Probabilities are calibrated: early stopping and a softmax temperature are fitted on 2024
 (held out from the 2021–2023 fit), and the daily models use large minimum leaf sizes because
-their 288 decision points per day are highly correlated. Calibration tables are in
-`research/manh_knyc/results/metrics.json`.
+their 288 decision points per day are highly correlated. All results below use that 2024
+temperature and are strictly out-of-sample. The *deployed* models then re-fit the calibration on
+2025–26 (the most recent held-out period): the temperature for all three, plus a logistic
+(Platt) correction of the hidden-max model's headline P(already higher), which scored with the
+2024 temperature came out overconfident in 2025–26 (stated 45% → observed 37%). After the
+correction it tracks the 2025–26 outcomes (35% → 32%, 45% → 46%, 75% → 72%); that check is
+in-sample for the two calibration parameters only.
+Calibration tables are in `research/manh_knyc/results/metrics.json`.
 
 ---
 
@@ -129,21 +175,22 @@ their 288 decision points per day are highly correlated. Calibration tables are 
 | Information used | Exact value is the top pick | Within ±1 °F | Log loss |
 |---|---|---|---|
 | No Mesonet (time, season, KNYC trend) | 38.0% | 82.1% | 1.515 |
-| + MANH only | 46.4% | 88.8% | 1.291 |
-| **+ MANH and 5-station blend (live model)** | **50.6%** | **91.6%** | **1.181** |
+| + MANH only | 46.4% | 88.9% | 1.290 |
+| + MANH and 5-station blend | 50.7% | 91.6% | 1.180 |
+| **+ Newark, Caldwell, Wall Street (live model)** | **51.4%** | **91.9%** | **1.168** |
 
 By how early the call is made (live model vs no Mesonet):
 
 | Mesonet reading used | Minutes before the METAR | Exact | Within ±1 °F |
 |---|---|---|---|
-| :50 | 1 | 54.0% (vs 37.7%) | 93.8% (vs 82.1%) |
-| :40 | 11 | 53.6% | 93.8% |
-| :25 | 26 | 51.2% | 92.4% |
-| :10 | 41 | 48.8% | 90.4% |
-| :55 (just after the last METAR) | 56 | 45.6% | 87.9% |
+| :50 | 1 | 54.6% (vs 37.7%) | 93.9% (vs 82.1%) |
+| :40 | 11 | 54.4% | 94.0% |
+| :25 | 26 | 51.9% | 92.5% |
+| :10 | 41 | 50.0% | 90.9% |
+| :55 (just after the last METAR) | 56 | 46.5% | 88.4% |
 
 Calibration is close to perfect: when the model says the next METAR will *differ* from the last
-one with probability 45%, it differs 44% of the time; at 85% it differs 87% of the time.
+one with probability 45%, it differs 43% of the time; at 85% it differs 88% of the time.
 
 ### 4b. Has KNYC already exceeded the published high?
 
@@ -152,33 +199,34 @@ At a random time of day, the true running high is above the published max 46% of
 | | Log loss | AUC (detect "already ≥ +1 °F") |
 |---|---|---|
 | No Mesonet | 0.877 | 0.761 |
-| **With Mesonet** | **0.782** | **0.827** |
+| **With Mesonet + airports** | **0.767** | **0.848** |
 
 The lift is largest in the afternoon, the window that matters before the 1:51 PM EDT 6-hour max
-release and the evening CLI: AUC 0.70 → 0.80 at 3 PM, 0.62 → 0.76 at 5 PM, 0.59 → 0.76 at
-6 PM. Calibration is good (stated 45% → observed 42%; 75% → 73%).
+release and the evening CLI: AUC 0.72 → 0.83 at 2 PM, 0.70 → 0.81 at 3 PM, 0.62 → 0.79 at
+5 PM, 0.58 → 0.79 at 6 PM. Scored with the 2024 calibration it is overconfident in the middle
+(stated 35% → observed 27%, 45% → 37%, 55% → 49%); the deployed model adds the Platt correction
+described in section 3.
 
 ### 4c. Final CLI high
 
 Share of decision points where the most likely value is exactly the CLI high:
 
-| Local time | No Mesonet | With Mesonet | Within ±1 °F (with Mesonet) |
+| Local time | No Mesonet | With Mesonet + airports | Within ±1 °F (live model) |
 |---|---|---|---|
-| 10 AM | 19.2% | 21.2% | 53% |
-| 12 PM | 22.8% | 24.4% | 61% |
-| 2 PM | 48.6% | 51.6% | 84% |
-| 3 PM | 55.2% | 59.6% | 91% |
-| 4 PM | 57.6% | 62.9% | 95% |
-| 5 PM | 60.8% | 67.5% | 97% |
-| 6 PM | 59.8% | 66.9% | 97% |
-| 7 PM | 69.2% | 75.4% | 98% |
+| 10 AM | 19.2% | 21.3% | 53% |
+| 12 PM | 22.2% | 26.1% | 64% |
+| 2 PM | 48.5% | 53.2% | 84% |
+| 3 PM | 54.9% | 60.6% | 91% |
+| 4 PM | 58.3% | 64.4% | 96% |
+| 5 PM | 61.0% | 67.1% | 97% |
+| 6 PM | 59.8% | 66.4% | 97% |
+| 7 PM | 69.5% | 74.7% | 97% |
 
 Before about 1 PM the final high is mostly a forecasting problem (NBM already carries most of
-what is knowable) and the Mesonet adds little. From 2 PM on, the question becomes "what already
-happened between hourlies", and the Mesonet adds 3–8 points of exact-value accuracy. Calibration
-of the per-value probabilities is reasonable but still slightly overconfident in the 30–50%
-range (stated 34% → observed 27%; stated 45% → observed 40%), so treat mid-range final-high
-odds as a few points too high.
+what is knowable) and the observations add little. From 2 PM on, the question becomes "what
+already happened between hourlies", and the Mesonet + airports add 5–7 points of exact-value
+accuracy. Per-value probabilities are well calibrated (stated 45% → observed 44%, 65% → 69%),
+slightly high only around 30–40% (34% → 29%).
 
 ---
 
@@ -191,6 +239,8 @@ odds as a few points too high.
 * **Next hourly METAR:** probability of each whole-°F value, plus P(lower / same / higher).
 * **Daily high (CLI):** the published max so far (METARs, SPECIs and 6-hour max groups), the
   probability that KNYC is *already* higher, and the final-high distribution.
+* **Airports row:** the latest Newark, Caldwell and Wall Street 5-minute reading (with its age)
+  and METAR.
 * **Model vs market:** today's KXHIGHNY brackets with model probability, Kalshi quote midpoint
   and the difference.
 * **Chart:** the implied KNYC path through the day, MANH raw, every KNYC report and the published
@@ -198,14 +248,15 @@ odds as a few points too high.
 
 Data latency in practice: MANH 5-minute values arrive ≈1m50s after their stamp, so the :50
 reading lands at ≈:51:50, usually *before* the :51 METAR reaches AWC (≈:53–:54). KNYC METARs
-come from aviationweather.gov, NBM from IEM, Kalshi from the public API. The TypeScript feature
+and airport METARs come from aviationweather.gov, airport 5-minute reports from api.weather.gov,
+NBM from IEM, Kalshi from the public API. The TypeScript feature
 engine is tested to reproduce the Python training features exactly on a replayed day
 (`tests/manh-nowcast.test.ts`).
 
 ## 6. How to read it, and caveats
 
 * **Strongest use cases:** (1) the last 10–15 minutes before an hourly, when the :45/:50 Mesonet
-  readings pin down the coming METAR (≈54% exact, ≈94% within ±1 °F); (2) mid/late afternoon,
+  readings pin down the coming METAR (≈55% exact, ≈94% within ±1 °F); (2) mid/late afternoon,
   when the question is whether the high already happened between hourlies and what the 6-hour
   group or CLI will reveal.
 * **Weakest use case:** the morning final-high forecast. Before noon the outcome depends on
@@ -226,3 +277,8 @@ engine is tested to reproduce the Python training features exactly on a replayed
 * Model vs market backtest on archived Kalshi candles (`MarketReactionPanel` infrastructure),
   especially around the 17:51 UTC 6-hour max release.
 * Additional NYC Micronet sites or HRRR short-range forecasts for the morning final-high problem.
+* A faster source for the airports' 5-minute reports. The dashboard already has a Synoptic token
+  (`SYNOPTIC_TOKEN`, used by the HF-ASOS panel); if Synoptic delivers them sooner than
+  api.weather.gov's 12–30 minutes, lowering `LATENCY_MIN` in `airports.py` and retraining should
+  recover much of the zero-delay gain.
+* Other stations upstream in westerly flow (e.g. Teterboro, Morristown) on the same test.

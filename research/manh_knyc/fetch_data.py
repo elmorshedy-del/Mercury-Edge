@@ -134,6 +134,26 @@ def fetch_1min_station(out: Path, start: date, end: date, station: str) -> None:
         cur = nxt
 
 
+def fetch_airport_reports(out: Path, start: date, end: date, station: str) -> None:
+    """Archived live feeds for an airport: MADIS 5-minute HF reports (whole degrees C, as
+    published in real time) and routine/special METARs (T-group tenths)."""
+    for kind, types in (("hf", "&report_type=1"), ("metar", "&report_type=3&report_type=4")):
+        target = out / f"iem_{kind}_{station}"
+        target.mkdir(parents=True, exist_ok=True)
+        for a, b in windows(start, end, 183):
+            path = target / f"{station}_{a.isoformat()}_{b.isoformat()}.csv"
+            if path.exists() and path.stat().st_size > 1000:
+                continue
+            url = (
+                f"{IEM}/cgi-bin/request/asos.py?station={station}&data=tmpf&data=drct&data=sknt&data=metar"
+                f"&year1={a.year}&month1={a.month}&day1={a.day}&year2={b.year}&month2={b.month}&day2={b.day}"
+                "&tz=Etc/UTC&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no" + types
+            )
+            path.write_bytes(http(url))
+            print(f"{kind} {station} {a}..{b}")
+            time.sleep(1)
+
+
 def fetch_cli(out: Path, start: date, end: date) -> None:
     target = out / "iem_cli"
     target.mkdir(parents=True, exist_ok=True)
@@ -168,9 +188,10 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--start", default="2021-01-01")
     parser.add_argument("--end", default=date.today().isoformat())
-    parser.add_argument("--only", choices=["manh", "metar", "1min", "cli", "nbm", "lga"], default=None)
+    parser.add_argument("--only", choices=["manh", "metar", "1min", "cli", "nbm", "lga", "airports"], default=None)
     parser.add_argument("--nysm-stations", default="MANH")
     parser.add_argument("--nysm-dataset", default="nysm", help="nysm (standard network) or nyc (NYC Micronet)")
+    parser.add_argument("--airports", default="EWR,CDW,JRB", help="IEM ids for --only airports (1-minute ASOS)")
     args = parser.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     args.out.mkdir(parents=True, exist_ok=True)
@@ -187,6 +208,10 @@ def main() -> None:
         fetch_1min(args.out, start, end)
     if args.only in (None, "lga"):
         fetch_1min_station(args.out, start, end, "LGA")
+    if args.only == "airports":
+        for station in args.airports.split(","):
+            fetch_airport_reports(args.out, start, end, station.strip().upper())
+            fetch_1min_station(args.out, start, end, station.strip().upper())
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from airports import AIRPORTS, load_reports
 from build import STATIONS, nbm_daily
 from load import load_manh
 from train import A_BASE, A_MESO, B_BASE, B_MESO
@@ -49,6 +50,16 @@ def main() -> None:
         s = _load_station_temp(args.data, st, ds).loc[lo:hi]
         obs.extend({"time": int(t.value // 10**6), "station": st, "tair": clean(v)} for t, v in s.items())
 
+    airport_hf, airport_metars = [], []
+    for code in AIRPORTS:
+        hf = load_reports(args.data, "hf", code).loc[lo:hi]
+        hf = hf[hf.index.minute % 5 == 0]
+        airport_hf.extend({"station": code, "time": int(t.value // 10**6), "tempF": clean(r["temp"]),
+                           "dirDeg": clean(r["drct"]), "speedKt": clean(r["sknt"])} for t, r in hf.iterrows())
+        met = load_reports(args.data, "metar", code).dropna(subset=["temp"]).loc[lo:hi]
+        airport_metars.extend({"station": code, "valid": int(t.value // 10**6), "temp": float(v)}
+                              for t, v in met["temp"].items())
+
     rep = base.reports[(base.reports["valid"] >= lo) & (base.reports["valid"] <= hi)].dropna(subset=["temp"])
     reports = [{"valid": int(r.valid.value // 10**6), "temp": float(r.temp), "max6": clean(r.max6),
                 "routine": bool(r.routine and r.has_tgroup), "raw": r.metar} for r in rep.itertuples()]
@@ -66,6 +77,7 @@ def main() -> None:
     args.out.write_text(json.dumps({
         "day": args.day, "start": int(lo.value // 10**6), "end": int(hi.value // 10**6),
         "observations": obs, "reports": reports, "nbm": nbm, "next_metar": a_out, "day_rows": b_out,
+        "airport_hf": airport_hf, "airport_metars": airport_metars,
     }))
     print(args.out, len(obs), len(reports), len(a_out), len(b_out), round(args.out.stat().st_size / 1e6, 2), "MB")
 

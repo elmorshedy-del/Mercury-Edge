@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from airports import Airport, airport_features, load_airports
 from load import c_to_f, climate_date, load_1min, load_cli, load_manh, load_metar, load_nbm
 
 LAT, LON = 40.7789, -73.9692  # KNYC / Central Park
@@ -73,6 +74,7 @@ class Base:
     cli: pd.DataFrame
     nbm: pd.DataFrame
     weights: dict[str, float] | None = None
+    airports: dict[str, Airport] | None = None
 
 
 def _load_station_temp(data_dir: Path, station: str, dataset: str) -> pd.Series:
@@ -108,7 +110,7 @@ def load_base(data_dir: Path) -> Base:
     reports = load_metar(data_dir)
     routine = reports[reports["routine"] & reports["has_tgroup"]].drop_duplicates("valid").set_index("valid")
     return Base(man=man, temps=temps, kmin=kmin, routine=routine, reports=reports,
-                cli=load_cli(data_dir), nbm=load_nbm(data_dir))
+                cli=load_cli(data_dir), nbm=load_nbm(data_dir), airports=load_airports(data_dir))
 
 
 def fit_blend_weights(base: Base, until: str = "2025-01-01") -> dict[str, float]:
@@ -257,6 +259,9 @@ def build_model_a(base: Base) -> pd.DataFrame:
     rows["dy"] = rows["y1"] - rows["y0"]
     # Hidden KNYC 5-minute value at tau (diagnostic only; never a feature)
     rows["k_tau"] = base.kmin["t5_raw"].reindex(pd.DatetimeIndex(rows["tau"])).to_numpy()
+    if base.airports:
+        air = airport_features(base.airports, pd.DatetimeIndex(rows["tau"]), rows["y0"].to_numpy())
+        rows = pd.concat([rows, air.set_index(rows.index)], axis=1)
     return rows
 
 
@@ -446,4 +451,8 @@ def build_model_b(base: Base, step: str = "5min") -> pd.DataFrame:
     res["fin"] = res["cli"] - res["known_max"]
     res = add_time_features(res)
     res["kt"] = res["srad30"] / np.maximum(res["clear_sky"], 50.0)
+    if base.airports:
+        air = airport_features(base.airports, pd.DatetimeIndex(res["tau"]), res["known_max"].to_numpy(),
+                               np.asarray(res["cdate"]))
+        res = pd.concat([res, air.set_index(res.index)], axis=1)
     return res

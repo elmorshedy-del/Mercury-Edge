@@ -1,0 +1,12 @@
+next METAR Mesonet only                       logloss=1.1805 acc=0.5063 | last 15 min acc=0.5393
+next METAR + EWR/CDW/JRB as published live    logloss=1.1679 acc=0.5129 | last 15 min acc=0.5454
+next METAR + EWR/CDW/JRB with zero delay      logloss=1.1557 acc=0.5158 | last 15 min acc=0.5444
+next METAR + EWR only (live)                  logloss=1.1742 acc=0.5086 | last 15 min acc=0.5419
+next METAR + CDW only (live)                  logloss=1.1719 acc=0.5091 | last 15 min acc=0.5412
+next METAR + JRB only (live)                  logloss=1.1807 acc=0.5047 | last 15 min acc=0.5370
+hidden Mesonet only                   logloss=0.7847 acc=0.6422 | 1-6pm logloss=0.7206 acc=0.6836 AUC(>=1)=0.8266
+hidden + airports as published live   logloss=0.7707 acc=0.6583 | 1-6pm logloss=0.7086 acc=0.6906 AUC(>=1)=0.8476
+hidden + airports with zero delay     logloss=0.7707 acc=0.6596 | 1-6pm logloss=0.7076 acc=0.6947 AUC(>=1)=0.8473
+final  Mesonet only                   logloss=1.4100 acc=0.4784 | 1-6pm logloss=1.0508 acc=0.5727
+final  + airports as published live   logloss=1.3944 acc=0.4875 | 1-6pm logloss=1.0401 acc=0.5800
+final  + airports with zero delay     logloss=1.3924 acc=0.4878 | 1-6pm logloss=1.0347 acc=0.5830

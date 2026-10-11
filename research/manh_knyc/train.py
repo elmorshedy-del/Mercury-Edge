@@ -24,6 +24,7 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from sklearn.metrics import log_loss, roc_auc_score
 
+from airports import AIRPORTS, LATENCY_MIN, METAR_LAG_MIN, feature_names as airport_feature_names
 from build import NEIGHBORS, STATIONS
 
 SPLIT = pd.Timestamp("2025-01-01", tz="UTC")
@@ -42,6 +43,10 @@ for p in ("m_", "z_"):
     for b in (0.5, 1.0):
         B_MESO += [f"{p}gap_closed_b{b}", f"{p}gap_open_b{b}", f"{p}gap_now_b{b}"]
 B_MESO += ["m_below_daymax", "m_slope30", "srad", "srad30", "kt"]
+# Mesonet-only sets are kept for the airport ablation; the deployed models add the airports.
+A_MESONET, B_MESONET = list(A_MESO), list(B_MESO)
+A_MESO += airport_feature_names(daily=False)
+B_MESO += airport_feature_names(daily=True)
 
 A_LO, A_HI = -5, 5          # next METAR change classes
 H_HI = 3                     # hidden-max classes 0..3 (3 = "3 or more")
@@ -139,6 +144,72 @@ def final_to_cli_probs(P: np.ndarray, df: pd.DataFrame) -> tuple[np.ndarray, np.
     return P, vals
 
 
+def fit_temperature(raw: np.ndarray, y: np.ndarray) -> float:
+    def nll(t: float) -> float:
+        P = softmax_t(raw, t)
+        return float(-np.log(np.clip(P[np.arange(len(y)), y], 1e-9, 1)).mean())
+
+    return round(float(minimize_scalar(nll, bounds=(0.5, 3.0), method="bounded").x), 4)
+
+
+def deploy_calibration(raw: np.ndarray, y: np.ndarray, hit_fn) -> dict:
+    """Temperature for the DEPLOYED model, refitted on the most recent held-out period
+    (2025-26 predictions from the model trained on 2021-24). Reported metrics keep the
+    2024-fitted temperature, so they stay strictly out-of-sample."""
+    t = fit_temperature(raw, y)
+    P = softmax_t(raw, t)
+    p, hit = hit_fn(P)
+    return {"temperature": t, "reliability_in_sample": reliability(p, hit)}
+
+
+def platt_fit(p: np.ndarray, hit: np.ndarray) -> list[float]:
+    """Logistic recalibration p' = sigmoid(a * logit(p) + b) for a single yes/no probability."""
+    z = np.log(np.clip(p, 1e-6, 1 - 1e-6) / np.clip(1 - p, 1e-6, 1 - 1e-6))
+
+    def nll(ab: np.ndarray) -> float:
+        q = 1 / (1 + np.exp(-(ab[0] * z + ab[1])))
+        return float(-np.mean(hit * np.log(np.clip(q, 1e-9, 1)) + (1 - hit) * np.log(np.clip(1 - q, 1e-9, 1))))
+
+    from scipy.optimize import minimize
+    res = minimize(nll, np.array([1.0, 0.0]), method="Nelder-Mead")
+    return [round(float(res.x[0]), 4), round(float(res.x[1]), 4)]
+
+
+def apply_platt(P: np.ndarray, ab: list[float]) -> np.ndarray:
+    """Rescale a hidden-max distribution so P(>= +1) follows the Platt correction."""
+    above = np.clip(1 - P[:, 0], 1e-6, 1 - 1e-6)
+    z = np.log(above / (1 - above))
+    new = 1 / (1 + np.exp(-(ab[0] * z + ab[1])))
+    out = P.copy()
+    out[:, 1:] = P[:, 1:] * (new / above)[:, None]
+    out[:, 0] = 1 - new
+    return out
+
+
+def row_logloss(P: np.ndarray, y: np.ndarray) -> np.ndarray:
+    return -np.log(np.clip(P[np.arange(len(y)), y], 1e-9, 1))
+
+
+def ablation(P_with: np.ndarray, P_without: np.ndarray, y: np.ndarray, groups: np.ndarray,
+             n_boot: int = 2000, seed: int = 11) -> dict:
+    """Log-loss change from adding the airports, with a 95% interval from resampling whole
+    days (rows within a day are strongly correlated, so a row bootstrap would be overconfident)."""
+    diff = row_logloss(P_with, y) - row_logloss(P_without, y)
+    per_day = pd.DataFrame({"d": diff, "g": groups}).groupby("g")["d"].agg(["sum", "count"])
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(per_day), (n_boot, len(per_day)))
+    boot = per_day["sum"].to_numpy()[idx].sum(1) / per_day["count"].to_numpy()[idx].sum(1)
+    return {
+        "logloss_without_airports": float(row_logloss(P_without, y).mean()),
+        "logloss_with_airports": float(row_logloss(P_with, y).mean()),
+        "change": float(diff.mean()),
+        "change_ci95": [float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))],
+        "acc_without_airports": float((P_without.argmax(1) == y).mean()),
+        "acc_with_airports": float((P_with.argmax(1) == y).mean()),
+        "days": int(len(per_day)),
+    }
+
+
 def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
     out: dict = {}
     # ---- Model A ----
@@ -148,7 +219,7 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
     nA = A_HI - A_LO + 1
     m_base = fit(A[tr], A_BASE, ya[tr], nA, 200)
     m_meso = fit(A[tr], A_BASE + A_MESO, ya[tr], nA, rounds_meso)
-    manh_only = [f for f in A_MESO if not (f.startswith("dz") or any(f.startswith(s) for s in NEIGHBORS))]
+    manh_only = [f for f in A_MESONET if not (f.startswith("dz") or any(f.startswith(s) for s in NEIGHBORS))]
     m_manh = fit(A[tr], A_BASE + manh_only, ya[tr], nA, rounds_meso)
     Pb, Ph = m_base.predict(A.loc[te, A_BASE]), m_manh.predict(A.loc[te, A_BASE + manh_only])
     Pm = proba(m_meso, A.loc[te, A_BASE + A_MESO], temp_a)
@@ -160,6 +231,13 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
         "no_mesonet": scores(Pb, y, nA), "manh_only": scores(Ph, y, nA), "manh_plus_blend": scores(Pm, y, nA),
         "by_lead": [], "reliability_change": reliability(1 - Pm[:, -A_LO], (y != -A_LO).astype(float)),
     }
+    out["next_metar"]["deploy"] = deploy_calibration(
+        m_meso.predict(A.loc[te, A_BASE + A_MESO], raw_score=True), y,
+        lambda P: (1 - P[:, -A_LO], (y != -A_LO).astype(float)))
+    m_noair = fit(A[tr], A_BASE + A_MESONET, ya[tr], nA, rounds_meso)
+    out["next_metar"]["airport_ablation"] = ablation(
+        m_meso.predict(A.loc[te, A_BASE + A_MESO]), m_noair.predict(A.loc[te, A_BASE + A_MESONET]), y,
+        A.loc[te, "t0"].dt.tz_convert("America/New_York").dt.date.to_numpy())
     lead = A.loc[te, "lead_min"].to_numpy()
     for L in sorted(np.unique(lead)):
         g = lead == L
@@ -186,6 +264,22 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
         "reliability_ge1": reliability(1 - Pm[:, 0], (y >= 1).astype(float)),
         "by_hour": [],
     }
+    raw_h = hm.predict(H.loc[te, B_BASE + B_MESO], raw_score=True)
+    out["hidden_max"]["deploy"] = deploy_calibration(raw_h, y, lambda P: (1 - P[:, 0], (y >= 1).astype(float)))
+    # One temperature cannot fix the headline yes/no odds, so add a Platt step on P(>= +1).
+    P_dep = softmax_t(raw_h, out["hidden_max"]["deploy"]["temperature"])
+    platt = platt_fit(1 - P_dep[:, 0], (y >= 1).astype(float))
+    out["hidden_max"]["deploy"]["platt_ge1"] = platt
+    out["hidden_max"]["deploy"]["reliability_platt_in_sample"] = reliability(
+        1 - apply_platt(P_dep, platt)[:, 0], (y >= 1).astype(float))
+    h_noair = fit(H[tr], B_BASE + B_MESONET, yh[tr], nH, rounds_h, DAILY_MIN_LEAF)
+    out["hidden_max"]["airport_ablation"] = ablation(
+        hm.predict(H.loc[te, B_BASE + B_MESO]), h_noair.predict(H.loc[te, B_BASE + B_MESONET]), y,
+        H.loc[te, "cdate"].to_numpy())
+    P_noair = h_noair.predict(H.loc[te, B_BASE + B_MESONET])
+    out["hidden_max"]["airport_ablation"]["auc_without_airports"] = float(roc_auc_score(y >= 1, 1 - P_noair[:, 0]))
+    out["hidden_max"]["airport_ablation"]["auc_with_airports"] = float(
+        roc_auc_score(y >= 1, 1 - hm.predict(H.loc[te, B_BASE + B_MESO])[:, 0]))
     for hr in range(6, 24):
         g = hrs == hr
         if g.sum() < 500 or len(np.unique(y[g] >= 1)) < 2:
@@ -232,6 +326,17 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
                          "logloss": float(-np.log(np.clip(r["p_true"][g], 1e-6, 1)).mean()),
                          "within1_mode": float((np.abs(r["mode"][g] - cli[g]) <= 1).mean())}
         out["final_high"]["by_hour"].append(row)
+    yt_f = yf[te]
+    out["final_high"]["deploy"] = deploy_calibration(
+        fm.predict(test[B_BASE + B_MESO], raw_score=True), yt_f,
+        lambda P: (P.ravel(), (np.arange(nF)[None, :] == yt_f[:, None]).ravel().astype(float)))
+    f_noair = fit(Fdf[tr], B_BASE + B_MESONET, yf[tr], nF, rounds_f, DAILY_MIN_LEAF)
+    out["final_high"]["airport_ablation"] = ablation(
+        fm.predict(test[B_BASE + B_MESO]), f_noair.predict(test[B_BASE + B_MESONET]), yf[te], test["cdate"].to_numpy())
+    pm = (hrs >= 13) & (hrs <= 18)
+    out["final_high"]["airport_ablation_1to6pm"] = ablation(
+        fm.predict(test[B_BASE + B_MESO])[pm], f_noair.predict(test[B_BASE + B_MESONET])[pm], yf[te][pm],
+        test["cdate"].to_numpy()[pm])
     # calibration of the probability assigned to each candidate CLI value
     P, vals = res["mesonet"]["P"], res["mesonet"]["vals"]
     out["final_high"]["reliability"] = reliability(P.ravel(), (vals == cli[:, None]).ravel().astype(float))
@@ -304,7 +409,8 @@ def main() -> None:
     mH = fit(H, B_BASE + B_MESO, yh, H_HI + 1, metrics.get("hidden_max", {}).get("rounds", 200), DAILY_MIN_LEAF)
     Fdf, yf = prep_final(b)
     mF = fit(Fdf, B_BASE + B_MESO, yf, F_HI + 1, metrics.get("final_high", {}).get("rounds", 150), DAILY_MIN_LEAF)
-    temps = {k: metrics.get(k, {}).get("temperature", 1.0) for k in ("next_metar", "hidden_max", "final_high")}
+    temps = {k: metrics.get(k, {}).get("deploy", {}).get("temperature", metrics.get(k, {}).get("temperature", 1.0))
+             for k in ("next_metar", "hidden_max", "final_high")}
     model = {
         "version": 1,
         "trained_through": str(pd.to_datetime(b["cdate"]).max().date()),
@@ -312,11 +418,13 @@ def main() -> None:
         "station_datasets": STATIONS,
         "blend_weights": base.weights,
         "publish_lag_min": 3,
+        "airports": {"stations": list(AIRPORTS), "hf_latency_min": LATENCY_MIN, "metar_lag_min": METAR_LAG_MIN},
         "nbm_lag_min": 75,
         "next_metar": {**export_booster(mA, A_BASE + A_MESO, A_HI - A_LO + 1), "class_offset": A_LO,
                        "temperature": temps["next_metar"]},
         "hidden_max": {**export_booster(mH, B_BASE + B_MESO, H_HI + 1), "class_offset": 0,
-                       "temperature": temps["hidden_max"]},
+                       "temperature": temps["hidden_max"],
+                       "platt_ge1": metrics.get("hidden_max", {}).get("deploy", {}).get("platt_ge1")},
         "final_high": {**export_booster(mF, B_BASE + B_MESO, F_HI + 1), "class_offset": 0,
                        "anchor": "known_max", "temperature": temps["final_high"]},
     }

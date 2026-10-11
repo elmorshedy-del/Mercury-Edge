@@ -49,6 +49,11 @@ type Payload = {
   tau: number;
   model: { version: number; trainedThrough: string; stations: string[] };
   stations: Array<{ station: string; dataset: string; weight: number; latest: { time: number; temp: number } | null }>;
+  airports?: Array<{
+    station: string;
+    hf: { time: number; temp: number | null } | null;
+    metar: { time: number; temp: number } | null;
+  }>;
   lastMetar: { valid: number; temp: number; raw?: string; receivedAt: string | null } | null;
   nextMetar: NextMetar;
   day: Day;
@@ -64,6 +69,7 @@ const STATION_NAMES: Record<string, string> = {
   MHMHIL: "Murray Hill",
   MHCHEL: "Chelsea",
 };
+const AIRPORT_NAMES: Record<string, string> = { EWR: "Newark", CDW: "Caldwell", JRB: "Wall St" };
 
 const localHour = (ms: number) =>
   Number(new Intl.DateTimeFormat("en-US", { hour: "numeric", hourCycle: "h23", timeZone: TZ }).format(new Date(ms)));
@@ -186,7 +192,8 @@ export function ManhNowcast({ selectedStid = "KNYC" }: { selectedStid?: string }
           <h2>What KNYC is doing between hourlies</h2>
         </div>
         <small>
-          MANH + 5 neighbouring NYS Mesonet sites, calibrated to KNYC&apos;s 5-minute ASOS average. Mesonet data as of {clock(data.tau)}
+          MANH + 5 neighbouring NYS Mesonet sites, plus Newark, Caldwell and Wall St ASOS, calibrated to KNYC&apos;s 5-minute
+          ASOS average. Mesonet data as of {clock(data.tau)}
           {error ? ` · refresh failed: ${error}` : ""}
         </small>
       </header>
@@ -301,8 +308,24 @@ export function ManhNowcast({ selectedStid = "KNYC" }: { selectedStid?: string }
         ))}
       </div>
 
+      {data.airports && data.airports.length > 0 && (
+        <div className={styles.airportRow}>
+          <span className={styles.airportLead}>Airports (5-min feeds arrive ~15–30 min late)</span>
+          {data.airports.map((a) => (
+            <div key={a.station}>
+              <span>{AIRPORT_NAMES[a.station] ?? a.station} · K{a.station}</span>
+              <b>{a.hf?.temp != null ? `${a.hf.temp.toFixed(1)}°` : "—"}</b>
+              <small>
+                {a.hf ? `5-min ${Math.round((data.generatedAt - a.hf.time) / 60_000)} min old` : "5-min feed down"}
+                {a.metar ? ` · METAR ${a.metar.temp}° ${clock(a.metar.time)}` : ""}
+              </small>
+            </div>
+          ))}
+        </div>
+      )}
+
       <p className={styles.note}>
-        Out-of-sample (2025–2026): at the :50 reading the next METAR&apos;s exact value is the top pick 54% of the time (94% within
+        Out-of-sample (2025–2026): at the :50 reading the next METAR&apos;s exact value is the top pick 55% of the time (94% within
         ±1°F), and the CLI high beats the highest hourly METAR on 58% of days. Final-high odds before ~1 PM rely mostly on NBM
         and run slightly hot in the 30–50% range; model vs market uses quote midpoints, not fills. Method:
         docs/MANH_KNYC_CALIBRATION.md.

@@ -15,6 +15,8 @@ done
 for st in MHMHIL MHCHEL; do
   python3 research/manh_knyc/fetch_data.py --out $DATA --only manh --nysm-dataset nyc --nysm-stations $st --start 2021-01-01
 done
+# Airports used by the model (archived live 5-minute feeds + METARs + 1-minute history)
+python3 research/manh_knyc/fetch_data.py --out $DATA --only airports --airports EWR,CDW,JRB --start 2021-01-01
 
 # 2. Build datasets (base.pkl, model_a.pkl, model_b.pkl in $DATA)
 python3 - <<'PY'
@@ -46,6 +48,8 @@ npm test
 | `train.py` | Train on 2021–2024, score 2025–2026, export compact LightGBM trees |
 | `analysis.py` | Descriptive findings (`results/descriptive.json`) |
 | `export_parity.py` | One-day replay so `tests/manh-nowcast.test.ts` proves TS == Python features |
+| `airports.py` | Newark / Caldwell / Wall Street features, built exactly as the live feeds arrive |
+| `airports_check.py` | Ablation: Mesonet-only vs + airports (live delays and zero delay), each airport alone |
 | `lga_check.py` | Tests KLGA (1-minute history, live feed simulated as whole °C and 20–30 min late) as an extra signal; needs `fetch_data.py --only lga` |
 
 `results/metrics.json` and `results/descriptive.json` hold the numbers quoted in the doc.
