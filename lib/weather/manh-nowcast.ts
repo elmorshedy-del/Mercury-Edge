@@ -27,6 +27,13 @@ export type NowcastModel = {
   hidden_max: ExportedBooster & { platt_ge1?: [number, number] | null };
   final_high: ExportedBooster & { anchor: string };
   airports?: { stations: string[]; hf_latency_min: number; metar_lag_min: number };
+  kalshi_index?: { city: string; stations: string[]; latency_min: number; config_prefix: string };
+};
+
+/** Kalshi live weather index feed (GET /live_data/weather/{city}). */
+export type KalshiIndexFeed = {
+  configVersion: string;
+  points: Array<{ t: number; v: number; contributors: number; status: string }>;
 };
 
 /** Airport 5-minute HF report (api.weather.gov / MADIS): whole degrees C converted to F. */
@@ -403,6 +410,63 @@ export function airportFeatures(air: AirportData | null, codes: string[], tau: n
 }
 
 // ------------------------------------------------------------------------------------------
+// Kalshi NYC weather index - mirrors research/manh_knyc/kalshi_index.py
+// ------------------------------------------------------------------------------------------
+
+export type KalshiIndexSeries = { start: number; length: number; latencyMs: number; raw: Float64Array };
+
+/**
+ * 5-minute index series. Only stamps with all eight contributors under the expected formula
+ * version are kept; anything else (degraded minutes, a changed formula) becomes missing.
+ */
+export function buildIndexSeries(model: NowcastModel, feed: KalshiIndexFeed | null, start: number, end: number) {
+  const cfg = model.kalshi_index;
+  if (!cfg) return null;
+  const length = Math.floor((end - start) / STEP_MS) + 1;
+  const raw = new Float64Array(length).fill(nan);
+  if (feed && feed.configVersion.startsWith(cfg.config_prefix)) {
+    for (const point of feed.points) {
+      if (point.contributors !== cfg.stations.length || !isNum(point.v)) continue;
+      const slot = (point.t - start) / STEP_MS;
+      if (Number.isInteger(slot) && slot >= 0 && slot < length) raw[slot] = point.v;
+    }
+  }
+  return { start, length, latencyMs: cfg.latency_min * MINUTE, raw };
+}
+
+export function indexFeatures(series: KalshiIndexSeries | null, tau: number, ref: number, cdate?: string) {
+  const rawAt = (time: number) => {
+    if (!series) return nan;
+    const slot = (time - series.start) / STEP_MS;
+    return Number.isInteger(slot) && slot >= 0 && slot < series.length ? series.raw[slot] : nan;
+  };
+  const filled = (time: number) => {
+    const value = rawAt(time);
+    return isNum(value) ? value : rawAt(time - STEP_MS); // pandas ffill(limit=1)
+  };
+  const avail = Math.floor((tau - (series?.latencyMs ?? 0)) / STEP_MS) * STEP_MS;
+  const cur = filled(avail);
+  const out: Record<string, number> = {
+    kidx_lvl: cur - ref,
+    kidx_d15: cur - filled(avail - 15 * MINUTE),
+    kidx_d30: cur - filled(avail - 30 * MINUTE),
+    kidx_d60: cur - filled(avail - HOUR),
+  };
+  if (cdate !== undefined) {
+    let dayMax = -Infinity;
+    if (series) {
+      for (let slot = 0; slot < series.length; slot += 1) {
+        const stamp = series.start + slot * STEP_MS;
+        const value = series.raw[slot];
+        if (isNum(value) && stamp + series.latencyMs <= tau && climateDate(stamp) === cdate) dayMax = Math.max(dayMax, value);
+      }
+    }
+    out.kidx_daymax_lvl = isNum(dayMax) ? dayMax - ref : nan;
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------------------------------
 // Model A: next routine METAR
 // ------------------------------------------------------------------------------------------
 
@@ -415,6 +479,7 @@ export function nextMetarFeatures(
   t0: number,
   tau: number,
   air: AirportData | null = null,
+  kidx: KalshiIndexSeries | null = null,
 ) {
   const routine = new Map(reports.filter((report) => report.routine).map((report) => [report.valid, report.temp]));
   const y0 = routine.get(t0);
@@ -478,6 +543,7 @@ export function nextMetarFeatures(
     features[`${station}_off`] = at(series, grid, t0 - MINUTE) - y0;
   }
   if (model.airports) Object.assign(features, airportFeatures(air, model.airports.stations, tau, y0));
+  if (model.kalshi_index) Object.assign(features, indexFeatures(kidx, tau, y0));
   return features;
 }
 
@@ -558,6 +624,7 @@ export function dayFeatures(
   nbm: NbmRun[],
   tau: number,
   air: AirportData | null = null,
+  kidx: KalshiIndexSeries | null = null,
 ) {
   const dayStart = climateDayStart(tau);
   const cdate = climateDate(dayStart);
@@ -614,6 +681,7 @@ export function dayFeatures(
     }
   }
   if (model.airports) Object.assign(features, airportFeatures(air, model.airports.stations, tau, knownMax, cdate));
+  if (model.kalshi_index) Object.assign(features, indexFeatures(kidx, tau, knownMax, cdate));
   return { features, knownMax, knownMetar, txn, nbmRun: nbmRun ?? null, cdate, dayStart };
 }
 

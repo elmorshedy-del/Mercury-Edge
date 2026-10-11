@@ -5,6 +5,7 @@ import { AWC_BASE_URL, IEM_BASE_URL, KALSHI_BASE_URL } from "@/lib/config";
 import { fetchJson, fetchText } from "@/lib/http";
 import { marketToBand, type KalshiEventDetail } from "@/lib/sources/kalshi";
 import { getAirportHf, getAirportMetars } from "@/lib/sources/airport-feeds";
+import { getKalshiIndex } from "@/lib/sources/kalshi-index";
 import { getNysmTimeseries } from "@/lib/sources/nysm";
 import {
   MINUTE,
@@ -12,6 +13,7 @@ import {
   blendChange,
   buildAirportData,
   buildGrid,
+  buildIndexSeries,
   climateDate,
   dayFeatures,
   latestGridTime,
@@ -23,6 +25,7 @@ import {
   type AirportHfObservation,
   type AirportMetar,
   type Distribution,
+  type KalshiIndexFeed,
   type Grid,
   type KnycReport,
   type MesonetObservation,
@@ -157,7 +160,7 @@ export async function GET() {
     const nysmStations = model.stations.filter((station) => model.station_datasets[station] === "nysm");
     const nycStations = model.stations.filter((station) => model.station_datasets[station] === "nyc");
     const airportCodes = model.airports?.stations ?? [];
-    const [nysm, nyc, reports, nbm, airportHf, airportMetars] = await Promise.all([
+    const [nysm, nyc, reports, nbm, airportHf, airportMetars, indexFeed] = await Promise.all([
       getNysmTimeseries("nysm", nysmStations, MANH_VARS, start, end),
       getNysmTimeseries("nyc", nycStations, ["tair"], start, end).catch(() => [] as MesonetObservation[]),
       getKnycReports(),
@@ -166,7 +169,12 @@ export async function GET() {
       airportCodes.length
         ? getAirportMetars(airportCodes, 32).catch(() => [] as AirportMetar[])
         : Promise.resolve([] as AirportMetar[]),
+      model.kalshi_index
+        ? getKalshiIndex(model.kalshi_index.city, start, now).catch(() => null)
+        : Promise.resolve(null as KalshiIndexFeed | null),
     ]);
+    const kidx = buildIndexSeries(model, indexFeed, start, end);
+    const lastIndexPoint = indexFeed?.points.at(-1) ?? null;
     const air = buildAirportData(model, airportHf, airportMetars, start, end);
     const observations = [...nysm, ...nyc].map((obs) => (obs.station === "MANH" ? obs : { ...obs, srad: null }));
     const grid = buildGrid(observations, model.stations, start, end);
@@ -209,7 +217,7 @@ export async function GET() {
       } else if (tau > t0 + 59 * MINUTE) {
         nextMetar = { status: "waiting", reason: "Next METAR is due; waiting for it to publish", dueAt };
       } else {
-        const features = nextMetarFeatures(model, grid, reports, t0, tau, air);
+        const features = nextMetarFeatures(model, grid, reports, t0, tau, air, kidx);
         if (!features) {
           nextMetar = { status: "unavailable", reason: "Feature window incomplete", dueAt };
         } else {
@@ -242,7 +250,7 @@ export async function GET() {
       status: "unavailable",
       reason: stale ? staleReason : "No KNYC report yet in this climate day",
     };
-    const dayResult = stale ? null : dayFeatures(model, grid, reports, nbm, tau, air);
+    const dayResult = stale ? null : dayFeatures(model, grid, reports, nbm, tau, air, kidx);
     if (dayResult) {
       const hidden = predictHiddenMax(model, dayResult.features);
       const finalDist = predictFinalHigh(model, dayResult.features, dayResult.knownMax).filter((item) => item.p >= 0.0005);
@@ -285,6 +293,20 @@ export async function GET() {
       model: { version: model.version, trainedThrough: model.trained_through, stations: model.stations },
       stations: stationsNow,
       airports: airportsNow,
+      kalshiIndex: lastIndexPoint
+        ? {
+            value: lastIndexPoint.v,
+            time: lastIndexPoint.t,
+            contributors: lastIndexPoint.contributors,
+            status: lastIndexPoint.status,
+            configVersion: indexFeed?.configVersion ?? null,
+            usable: Boolean(
+              model.kalshi_index &&
+                indexFeed?.configVersion.startsWith(model.kalshi_index.config_prefix) &&
+                lastIndexPoint.contributors === model.kalshi_index.stations.length,
+            ),
+          }
+        : null,
       lastMetar: lastRoutine ? { valid: lastRoutine.valid, temp: lastRoutine.temp, raw: lastRoutine.raw, receivedAt: lastRoutine.receivedAt } : null,
       nextMetar,
       day,

@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from airports import Airport, airport_features, load_airports
+from kalshi_index import index_features, rebuild_index
 from load import c_to_f, climate_date, load_1min, load_cli, load_manh, load_metar, load_nbm
 
 LAT, LON = 40.7789, -73.9692  # KNYC / Central Park
@@ -75,6 +76,7 @@ class Base:
     nbm: pd.DataFrame
     weights: dict[str, float] | None = None
     airports: dict[str, Airport] | None = None
+    kalshi_index: pd.Series | None = None
 
 
 def _load_station_temp(data_dir: Path, station: str, dataset: str) -> pd.Series:
@@ -110,7 +112,8 @@ def load_base(data_dir: Path) -> Base:
     reports = load_metar(data_dir)
     routine = reports[reports["routine"] & reports["has_tgroup"]].drop_duplicates("valid").set_index("valid")
     return Base(man=man, temps=temps, kmin=kmin, routine=routine, reports=reports,
-                cli=load_cli(data_dir), nbm=load_nbm(data_dir), airports=load_airports(data_dir))
+                cli=load_cli(data_dir), nbm=load_nbm(data_dir), airports=load_airports(data_dir),
+                kalshi_index=rebuild_index(data_dir))
 
 
 def fit_blend_weights(base: Base, until: str = "2025-01-01") -> dict[str, float]:
@@ -262,6 +265,9 @@ def build_model_a(base: Base) -> pd.DataFrame:
     if base.airports:
         air = airport_features(base.airports, pd.DatetimeIndex(rows["tau"]), rows["y0"].to_numpy())
         rows = pd.concat([rows, air.set_index(rows.index)], axis=1)
+    if base.kalshi_index is not None:
+        kidx = index_features(base.kalshi_index, pd.DatetimeIndex(rows["tau"]), rows["y0"].to_numpy())
+        rows = pd.concat([rows, kidx.set_index(rows.index)], axis=1)
     return rows
 
 
@@ -455,4 +461,8 @@ def build_model_b(base: Base, step: str = "5min") -> pd.DataFrame:
         air = airport_features(base.airports, pd.DatetimeIndex(res["tau"]), res["known_max"].to_numpy(),
                                np.asarray(res["cdate"]))
         res = pd.concat([res, air.set_index(res.index)], axis=1)
+    if base.kalshi_index is not None:
+        kidx = index_features(base.kalshi_index, pd.DatetimeIndex(res["tau"]), res["known_max"].to_numpy(),
+                              np.asarray(res["cdate"]))
+        res = pd.concat([res, kidx.set_index(res.index)], axis=1)
     return res

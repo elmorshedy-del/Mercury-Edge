@@ -60,6 +60,10 @@ def main() -> None:
         airport_metars.extend({"station": code, "valid": int(t.value // 10**6), "temp": float(v)}
                               for t, v in met["temp"].items())
 
+    kidx = base.kalshi_index.loc[lo:hi].dropna()
+    index_points = [{"t": int(t.value // 10**6), "v": float(v), "contributors": 8, "status": "normal"}
+                    for t, v in kidx.items()]
+
     rep = base.reports[(base.reports["valid"] >= lo) & (base.reports["valid"] <= hi)].dropna(subset=["temp"])
     reports = [{"valid": int(r.valid.value // 10**6), "temp": float(r.temp), "max6": clean(r.max6),
                 "routine": bool(r.routine and r.has_tgroup), "raw": r.metar} for r in rep.itertuples()]
@@ -78,6 +82,7 @@ def main() -> None:
         "day": args.day, "start": int(lo.value // 10**6), "end": int(hi.value // 10**6),
         "observations": obs, "reports": reports, "nbm": nbm, "next_metar": a_out, "day_rows": b_out,
         "airport_hf": airport_hf, "airport_metars": airport_metars,
+        "kalshi_index": {"configVersion": "nyc-temperature-v1.0", "points": index_points},
     }))
     print(args.out, len(obs), len(reports), len(a_out), len(b_out), round(args.out.stat().st_size / 1e6, 2), "MB")
 

@@ -1,0 +1,5 @@
+index rebuilt: 504052 of 607681 stamps
+next METAR + index (10 min late): logloss 1.1679 -> 1.1629 (CI -0.0081..-0.0019) acc 0.5129 -> 0.5153
+next METAR + index (5 min late): logloss 1.1679 -> 1.1607 (CI -0.0104..-0.0040) acc 0.5129 -> 0.5150
+hidden_max + index (10 min late): logloss 0.7707 -> 0.7668 (CI -0.0105..+0.0024) acc 0.6583 -> 0.6653
+final_high + index (10 min late): logloss 1.3944 -> 1.3864 (CI -0.0192..+0.0024) acc 0.4875 -> 0.4918

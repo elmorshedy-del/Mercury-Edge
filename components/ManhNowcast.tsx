@@ -49,6 +49,14 @@ type Payload = {
   tau: number;
   model: { version: number; trainedThrough: string; stations: string[] };
   stations: Array<{ station: string; dataset: string; weight: number; latest: { time: number; temp: number } | null }>;
+  kalshiIndex?: {
+    value: number;
+    time: number;
+    contributors: number;
+    status: string;
+    configVersion: string | null;
+    usable: boolean;
+  } | null;
   airports?: Array<{
     station: string;
     hf: { time: number; temp: number | null } | null;
@@ -192,8 +200,8 @@ export function ManhNowcast({ selectedStid = "KNYC" }: { selectedStid?: string }
           <h2>What KNYC is doing between hourlies</h2>
         </div>
         <small>
-          MANH + 5 neighbouring NYS Mesonet sites, plus Newark, Caldwell and Wall St ASOS, calibrated to KNYC&apos;s 5-minute
-          ASOS average. Mesonet data as of {clock(data.tau)}
+          MANH + 5 neighbouring NYS Mesonet sites, Newark, Caldwell and Wall St ASOS, and Kalshi&apos;s 8-airport NYC index,
+          calibrated to KNYC&apos;s 5-minute ASOS average. Mesonet data as of {clock(data.tau)}
           {error ? ` · refresh failed: ${error}` : ""}
         </small>
       </header>
@@ -310,7 +318,17 @@ export function ManhNowcast({ selectedStid = "KNYC" }: { selectedStid?: string }
 
       {data.airports && data.airports.length > 0 && (
         <div className={styles.airportRow}>
-          <span className={styles.airportLead}>Airports (5-min feeds arrive ~15–30 min late)</span>
+          <span className={styles.airportLead}>Airports · Kalshi index ~5 min late · NWS 5-min feeds ~15–30 min late</span>
+          {data.kalshiIndex && (
+            <div>
+              <span>Kalshi NYC index · 8 airports</span>
+              <b>{data.kalshiIndex.value.toFixed(2)}°</b>
+              <small>
+                {Math.round((data.generatedAt - data.kalshiIndex.time) / 60_000)} min old · {data.kalshiIndex.contributors}/8
+                {data.kalshiIndex.usable ? "" : " · not used (degraded or new formula)"}
+              </small>
+            </div>
+          )}
           {data.airports.map((a) => (
             <div key={a.station}>
               <span>{AIRPORT_NAMES[a.station] ?? a.station} · K{a.station}</span>

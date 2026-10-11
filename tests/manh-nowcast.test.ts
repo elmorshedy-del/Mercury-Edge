@@ -6,6 +6,7 @@ import {
   applyPlatt,
   buildAirportData,
   buildGrid,
+  buildIndexSeries,
   climateDayStart,
   dayFeatures,
   interpolateInside,
@@ -14,6 +15,7 @@ import {
   predictFinalHigh,
   type AirportHfObservation,
   type AirportMetar,
+  type KalshiIndexFeed,
   type KnycReport,
   type MesonetObservation,
   type NbmRun,
@@ -33,6 +35,7 @@ type DayFixture = {
   day_rows: Array<FeatureRow & { tau: number }>;
   airport_hf: AirportHfObservation[];
   airport_metars: AirportMetar[];
+  kalshi_index: KalshiIndexFeed;
 };
 
 function assertClose(actual: number, expected: number | null, label: string) {
@@ -83,6 +86,20 @@ test("METAR parser recovers whole-degree F from the T-group and the 6-hour max",
   assert.equal(report?.routine, true);
 });
 
+test("Kalshi index is ignored when degraded or under a different formula version", () => {
+  const cfgModel = { ...model, kalshi_index: { city: "nyc", stations: ["A", "B", "C", "D", "E", "F", "G", "H"], latency_min: 5, config_prefix: "nyc-temperature-v1.0" } };
+  const start = Date.parse("2026-10-11T12:00:00Z");
+  const points = [
+    { t: start, v: 60.08, contributors: 8, status: "normal" },
+    { t: start + 5 * 60_000, v: 60.3, contributors: 7, status: "degraded" },
+  ];
+  const ok = buildIndexSeries(cfgModel, { configVersion: "nyc-temperature-v1.0-cal-20261005", points }, start, start + 10 * 60_000);
+  assert.equal(ok?.raw[0], 60.08);
+  assert.ok(Number.isNaN(ok?.raw[1] ?? 0));
+  const changed = buildIndexSeries(cfgModel, { configVersion: "nyc-temperature-v2.0", points }, start, start + 10 * 60_000);
+  assert.ok(Number.isNaN(changed?.raw[0] ?? 0));
+});
+
 test("climate day uses local standard time", () => {
   assert.equal(climateDayStart(Date.parse("2026-07-14T05:00:00Z")), Date.parse("2026-07-13T05:00:00Z"));
   assert.equal(climateDayStart(Date.parse("2026-07-14T05:05:00Z")), Date.parse("2026-07-14T05:00:00Z"));
@@ -93,17 +110,19 @@ test("live feature engine replays build.py exactly for a historical day", () => 
   const grid = buildGrid(fixture.observations, model.stations, fixture.start, fixture.end);
   const air = buildAirportData(model, fixture.airport_hf, fixture.airport_metars, fixture.start, fixture.end);
   assert.ok(air, "model should carry the airport configuration");
+  const kidx = buildIndexSeries(model, fixture.kalshi_index, fixture.start, fixture.end);
+  assert.ok(kidx, "model should carry the Kalshi index configuration");
   const reports: KnycReport[] = fixture.reports.map((report) => ({ ...report, max6: report.max6 ?? null }));
   assert.ok(fixture.next_metar.length > 200 && fixture.day_rows.length > 200);
   for (const row of fixture.next_metar) {
-    const features = nextMetarFeatures(model, grid, reports, row.t0, row.tau, air);
+    const features = nextMetarFeatures(model, grid, reports, row.t0, row.tau, air, kidx);
     assert.ok(features, `features at ${new Date(row.tau).toISOString()}`);
     for (const [name, expected] of Object.entries(row.features)) {
       assertClose(features[name], expected, `A ${new Date(row.tau).toISOString()} ${name}`);
     }
   }
   for (const row of fixture.day_rows) {
-    const result = dayFeatures(model, grid, reports, fixture.nbm, row.tau, air);
+    const result = dayFeatures(model, grid, reports, fixture.nbm, row.tau, air, kidx);
     assert.ok(result, `day features at ${new Date(row.tau).toISOString()}`);
     for (const [name, expected] of Object.entries(row.features)) {
       assertClose(result.features[name], expected, `B ${new Date(row.tau).toISOString()} ${name}`);

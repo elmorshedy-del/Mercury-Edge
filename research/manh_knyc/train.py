@@ -26,6 +26,7 @@ from sklearn.metrics import log_loss, roc_auc_score
 
 from airports import AIRPORTS, LATENCY_MIN, METAR_LAG_MIN, feature_names as airport_feature_names
 from build import NEIGHBORS, STATIONS
+from kalshi_index import CONFIG_PREFIX, INDEX_LATENCY_MIN, INDEX_STATIONS, feature_names as index_feature_names
 
 SPLIT = pd.Timestamp("2025-01-01", tz="UTC")
 SPLIT_DATE = date(2025, 1, 1)
@@ -47,6 +48,10 @@ B_MESO += ["m_below_daymax", "m_slope30", "srad", "srad30", "kt"]
 A_MESONET, B_MESONET = list(A_MESO), list(B_MESO)
 A_MESO += airport_feature_names(daily=False)
 B_MESO += airport_feature_names(daily=True)
+# Without Kalshi's index (for its own ablation); the deployed models add it.
+A_NOIDX, B_NOIDX = list(A_MESO), list(B_MESO)
+A_MESO += index_feature_names(daily=False)
+B_MESO += index_feature_names(daily=True)
 
 A_LO, A_HI = -5, 5          # next METAR change classes
 H_HI = 3                     # hidden-max classes 0..3 (3 = "3 or more")
@@ -235,9 +240,11 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
         m_meso.predict(A.loc[te, A_BASE + A_MESO], raw_score=True), y,
         lambda P: (1 - P[:, -A_LO], (y != -A_LO).astype(float)))
     m_noair = fit(A[tr], A_BASE + A_MESONET, ya[tr], nA, rounds_meso)
-    out["next_metar"]["airport_ablation"] = ablation(
-        m_meso.predict(A.loc[te, A_BASE + A_MESO]), m_noair.predict(A.loc[te, A_BASE + A_MESONET]), y,
-        A.loc[te, "t0"].dt.tz_convert("America/New_York").dt.date.to_numpy())
+    m_noidx = fit(A[tr], A_BASE + A_NOIDX, ya[tr], nA, rounds_meso)
+    days_a = A.loc[te, "t0"].dt.tz_convert("America/New_York").dt.date.to_numpy()
+    P_noidx = m_noidx.predict(A.loc[te, A_BASE + A_NOIDX])
+    out["next_metar"]["airport_ablation"] = ablation(P_noidx, m_noair.predict(A.loc[te, A_BASE + A_MESONET]), y, days_a)
+    out["next_metar"]["index_ablation"] = ablation(m_meso.predict(A.loc[te, A_BASE + A_MESO]), P_noidx, y, days_a)
     lead = A.loc[te, "lead_min"].to_numpy()
     for L in sorted(np.unique(lead)):
         g = lead == L
@@ -273,13 +280,16 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
     out["hidden_max"]["deploy"]["reliability_platt_in_sample"] = reliability(
         1 - apply_platt(P_dep, platt)[:, 0], (y >= 1).astype(float))
     h_noair = fit(H[tr], B_BASE + B_MESONET, yh[tr], nH, rounds_h, DAILY_MIN_LEAF)
-    out["hidden_max"]["airport_ablation"] = ablation(
-        hm.predict(H.loc[te, B_BASE + B_MESO]), h_noair.predict(H.loc[te, B_BASE + B_MESONET]), y,
-        H.loc[te, "cdate"].to_numpy())
+    h_noidx = fit(H[tr], B_BASE + B_NOIDX, yh[tr], nH, rounds_h, DAILY_MIN_LEAF)
     P_noair = h_noair.predict(H.loc[te, B_BASE + B_MESONET])
+    P_noidx = h_noidx.predict(H.loc[te, B_BASE + B_NOIDX])
+    P_all = hm.predict(H.loc[te, B_BASE + B_MESO])
+    days_h = H.loc[te, "cdate"].to_numpy()
+    out["hidden_max"]["airport_ablation"] = ablation(P_noidx, P_noair, y, days_h)
     out["hidden_max"]["airport_ablation"]["auc_without_airports"] = float(roc_auc_score(y >= 1, 1 - P_noair[:, 0]))
-    out["hidden_max"]["airport_ablation"]["auc_with_airports"] = float(
-        roc_auc_score(y >= 1, 1 - hm.predict(H.loc[te, B_BASE + B_MESO])[:, 0]))
+    out["hidden_max"]["airport_ablation"]["auc_with_airports"] = float(roc_auc_score(y >= 1, 1 - P_noidx[:, 0]))
+    out["hidden_max"]["index_ablation"] = ablation(P_all, P_noidx, y, days_h)
+    out["hidden_max"]["index_ablation"]["auc_with_index"] = float(roc_auc_score(y >= 1, 1 - P_all[:, 0]))
     for hr in range(6, 24):
         g = hrs == hr
         if g.sum() < 500 or len(np.unique(y[g] >= 1)) < 2:
@@ -331,12 +341,15 @@ def evaluate(a: pd.DataFrame, b: pd.DataFrame) -> dict:
         fm.predict(test[B_BASE + B_MESO], raw_score=True), yt_f,
         lambda P: (P.ravel(), (np.arange(nF)[None, :] == yt_f[:, None]).ravel().astype(float)))
     f_noair = fit(Fdf[tr], B_BASE + B_MESONET, yf[tr], nF, rounds_f, DAILY_MIN_LEAF)
-    out["final_high"]["airport_ablation"] = ablation(
-        fm.predict(test[B_BASE + B_MESO]), f_noair.predict(test[B_BASE + B_MESONET]), yf[te], test["cdate"].to_numpy())
+    f_noidx = fit(Fdf[tr], B_BASE + B_NOIDX, yf[tr], nF, rounds_f, DAILY_MIN_LEAF)
+    P_noair = f_noair.predict(test[B_BASE + B_MESONET])
+    P_noidx = f_noidx.predict(test[B_BASE + B_NOIDX])
+    P_all = fm.predict(test[B_BASE + B_MESO])
+    days_f = test["cdate"].to_numpy()
+    out["final_high"]["airport_ablation"] = ablation(P_noidx, P_noair, yf[te], days_f)
+    out["final_high"]["index_ablation"] = ablation(P_all, P_noidx, yf[te], days_f)
     pm = (hrs >= 13) & (hrs <= 18)
-    out["final_high"]["airport_ablation_1to6pm"] = ablation(
-        fm.predict(test[B_BASE + B_MESO])[pm], f_noair.predict(test[B_BASE + B_MESONET])[pm], yf[te][pm],
-        test["cdate"].to_numpy()[pm])
+    out["final_high"]["index_ablation_1to6pm"] = ablation(P_all[pm], P_noidx[pm], yf[te][pm], days_f[pm])
     # calibration of the probability assigned to each candidate CLI value
     P, vals = res["mesonet"]["P"], res["mesonet"]["vals"]
     out["final_high"]["reliability"] = reliability(P.ravel(), (vals == cli[:, None]).ravel().astype(float))
@@ -419,6 +432,8 @@ def main() -> None:
         "blend_weights": base.weights,
         "publish_lag_min": 3,
         "airports": {"stations": list(AIRPORTS), "hf_latency_min": LATENCY_MIN, "metar_lag_min": METAR_LAG_MIN},
+        "kalshi_index": {"city": "nyc", "stations": list(INDEX_STATIONS), "latency_min": INDEX_LATENCY_MIN,
+                         "config_prefix": CONFIG_PREFIX},
         "nbm_lag_min": 75,
         "next_metar": {**export_booster(mA, A_BASE + A_MESO, A_HI - A_LO + 1), "class_offset": A_LO,
                        "temperature": temps["next_metar"]},

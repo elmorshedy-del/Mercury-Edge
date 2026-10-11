@@ -1,0 +1,50 @@
+{
+ "next_metar_latency_10": {
+  "logloss_without_airports": 1.1678972511412344,
+  "logloss_with_airports": 1.1629048616862814,
+  "change": -0.004992389454953361,
+  "change_ci95": [
+   -0.00806139049587438,
+   -0.0018980532424580472
+  ],
+  "acc_without_airports": 0.5128564169160409,
+  "acc_with_airports": 0.515284286601547,
+  "days": 627
+ },
+ "next_metar_latency_5": {
+  "logloss_without_airports": 1.1678972511412344,
+  "logloss_with_airports": 1.1606957970803606,
+  "change": -0.0072014540608740536,
+  "change_ci95": [
+   -0.010358327249584305,
+   -0.004033243242457639
+  ],
+  "acc_without_airports": 0.5128564169160409,
+  "acc_with_airports": 0.5149793913387161,
+  "days": 627
+ },
+ "hidden_max": {
+  "logloss_without_airports": 0.7706725726546843,
+  "logloss_with_airports": 0.7667801129015147,
+  "change": -0.0038924597531696174,
+  "change_ci95": [
+   -0.010496015408348582,
+   0.002390980607066585
+  ],
+  "acc_without_airports": 0.6582508109953902,
+  "acc_with_airports": 0.6652723237152126,
+  "days": 512
+ },
+ "final_high": {
+  "logloss_without_airports": 1.394363599893835,
+  "logloss_with_airports": 1.3864109982235604,
+  "change": -0.007952601670274794,
+  "change_ci95": [
+   -0.0192199366088308,
+   0.0024088520112261593
+  ],
+  "acc_without_airports": 0.4875386272954381,
+  "acc_with_airports": 0.49178318987461667,
+  "days": 608
+ }
+}
