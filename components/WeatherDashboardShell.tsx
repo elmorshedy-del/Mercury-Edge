@@ -7,6 +7,7 @@ import { SixHourReleaseStrip } from "@/components/SixHourReleaseStrip";
 import { DsmReleaseStrip } from "@/components/DsmReleaseStrip";
 import { FullDayHfArchive } from "@/components/FullDayHfArchive";
 import { LaxCapWatch } from "@/components/LaxCapWatch";
+import { ManhNowcast } from "@/components/ManhNowcast";
 import { WeatherHistoryPanel } from "@/components/WeatherHistoryPanel";
 import { WeatherStudyTable } from "@/components/WeatherStudyTable";
 import styles from "@/app/weather-dashboard/weather-shell.module.css";
@@ -75,6 +76,7 @@ export function WeatherDashboardShell() {
         {view === "live" && (
           <div className={styles.stack}>
             <WeatherDashboardClient selectedStid={selectedStid} embedded />
+            {selectedStid === "KNYC" && <ManhNowcast selectedStid={selectedStid} />}
             {selectedStid === "KLAX" && <LaxCapWatch selectedStid={selectedStid} />}
           </div>
         )}

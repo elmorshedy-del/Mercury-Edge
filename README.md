@@ -28,6 +28,7 @@ The evidence is classified before it is scored:
 | [NOAA MADIS OMO](https://madis.ncep.noaa.gov/madis_OMO.shtml) | One-minute ASOS observations | source receipt when available |
 | [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/) | High-frequency historical discovery and raw products | discovery time only for pages without receipt metadata |
 | [Kalshi public API](https://docs.kalshi.com/) | Events, contract bands, and one-minute candles | candle end time |
+| [NYS Mesonet](https://nysmesonet.org/) timeseries API | 5-minute MANH + neighbouring sites for the KNYC between-hourlies nowcast ([method](docs/MANH_KNYC_CALIBRATION.md)) | observation stamp (+~2 min arrival) |
 
 Archived IEM high-frequency rows that lack the original source receipt are stored with `receipt_quality=discovery_only`. They can inform station trajectory studies, but the engine automatically rejects them as executable latency evidence.
 
@@ -133,6 +134,7 @@ lib/jobs/            Persistent job repository, ingestion unit, and worker logic
 scripts/             Migrations, live ingestion, research worker, recovery CLIs
 sql/                 PostgreSQL schema
 tests/               Timestamp, parsing, and no-lookahead tests
+research/manh_knyc/  Python pipeline behind the MANH -> KNYC nowcast model
 ```
 
 ## Scope and risk
