@@ -131,7 +131,7 @@ export function WeatherHistoryPanel({ stid, city, timezone }: { stid: string; ci
         <div>
           <span>Frozen day explorer</span>
           <h2>{city} · archived Kalshi + TWC</h2>
-          <p>Pick a date and replay that day without mixing in today's prices or forecast.</p>
+          <p>Pick a date and replay that day without mixing in today’s prices or forecast.</p>
         </div>
         <label className={styles.dateControl}>
           <span>Date</span>
