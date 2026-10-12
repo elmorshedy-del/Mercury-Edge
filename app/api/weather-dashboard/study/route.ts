@@ -183,6 +183,33 @@ async function frozenTwcHigh(stid: string, date: string, timezone: string) {
   };
 }
 
+// A later forecast is ONE archived TWC calendar-day maximum per station/day:
+// the last non-null daily-high value captured on the target LOCAL calendar day.
+// Never use an after-midnight snapshot: that would introduce hindsight.
+async function laterTwcHigh(stid: string, date: string, timezone: string) {
+  if (!hasDatabase) return null;
+  const snapshot = await query<SnapshotRow>(
+    `SELECT captured_at,
+            NULLIF(daily_highs ->> ($2::text), '')::real AS forecast_high
+     FROM weather_forecast_snapshots
+     WHERE stid = $1
+       AND source = 'twc'
+       AND captured_at >= ($2::date::timestamp AT TIME ZONE $3)
+       AND captured_at < (($2::date + 1)::timestamp AT TIME ZONE $3)
+       AND NULLIF(daily_highs ->> ($2::text), '') IS NOT NULL
+     ORDER BY captured_at DESC
+     LIMIT 1`,
+    [stid, date, timezone],
+  );
+  const row = snapshot.rows[0];
+  if (!row || row.forecast_high === null) return null;
+  return {
+    forecastHigh: row.forecast_high,
+    capturedAt: row.captured_at.toISOString(),
+    provenance: "last archived same-day TWC forecast",
+  };
+}
+
 async function settledKalshiDay(seriesTicker: string, date: string) {
   const eventTicker = exactEventTicker(seriesTicker, date);
   if (!eventTicker) return null;
@@ -231,26 +258,37 @@ export async function GET() {
       if (!config) throw new Error(`Station config missing for ${stid}`);
 
       const values = await Promise.all(dates.map(async (date) => {
-        const [baseline, outcome] = await Promise.all([
+        const [baseline, laterForecast, outcome] = await Promise.all([
           frozenTwcHigh(stid, date, config.timezone),
+          laterTwcHigh(stid, date, config.timezone),
           settledKalshiDay(config.kalshiSeries, date),
         ]);
 
         const forecastHigh = baseline?.forecastHigh ?? null;
+        const laterForecastHigh = laterForecast?.forecastHigh ?? null;
         const realizedHigh = outcome?.realizedHigh ?? null;
         const error = forecastHigh !== null && realizedHigh !== null ? forecastHigh - realizedHigh : null;
+        const laterError = laterForecastHigh !== null && realizedHigh !== null ? laterForecastHigh - realizedHigh : null;
         const hit = forecastHigh !== null && outcome?.settled && outcome.winningBucket
           ? inBand(forecastHigh, outcome.winningBucket.lower, outcome.winningBucket.upper)
+          : null;
+        const laterHit = laterForecastHigh !== null && outcome?.settled && outcome.winningBucket
+          ? inBand(laterForecastHigh, outcome.winningBucket.lower, outcome.winningBucket.upper)
           : null;
 
         return {
           date,
           forecastHigh,
+          laterForecastHigh,
           realizedHigh,
           error,
+          laterError,
           hit,
+          laterHit,
           forecastCapturedAt: baseline?.capturedAt ?? null,
           forecastProvenance: baseline?.provenance ?? null,
+          laterForecastCapturedAt: laterForecast?.capturedAt ?? null,
+          laterForecastProvenance: laterForecast?.provenance ?? null,
           eventTicker: outcome?.eventTicker ?? null,
           winningBucket: outcome?.winningBucket ?? null,
           settled: outcome?.settled ?? false,
@@ -264,6 +302,13 @@ export async function GET() {
       const hitValues = values
         .map((item) => item.hit)
         .filter((value): value is boolean => value !== null);
+      const laterAbsoluteErrors = values
+        .map((item) => item.laterError)
+        .filter((value): value is number => value !== null)
+        .map((value) => Math.abs(value));
+      const laterHitValues = values
+        .map((item) => item.laterHit)
+        .filter((value): value is boolean => value !== null);
 
       return {
         stid,
@@ -272,8 +317,15 @@ export async function GET() {
         mae: absoluteErrors.length
           ? absoluteErrors.reduce((sum, value) => sum + value, 0) / absoluteErrors.length
           : null,
+        maeCount: absoluteErrors.length,
+        laterMae: laterAbsoluteErrors.length
+          ? laterAbsoluteErrors.reduce((sum, value) => sum + value, 0) / laterAbsoluteErrors.length
+          : null,
+        laterMaeCount: laterAbsoluteErrors.length,
         hits: hitValues.filter(Boolean).length,
         hitTotal: hitValues.length,
+        laterHits: laterHitValues.filter(Boolean).length,
+        laterHitTotal: laterHitValues.length,
       };
     }));
 
@@ -281,7 +333,7 @@ export async function GET() {
       dates,
       rows,
       updatedAt: new Date().toISOString(),
-      definition: "Frozen TWC calendar-day high captured before local midnight → Kalshi/TWC settlement high.",
+      definition: "Frozen pre-day TWC daily high vs last archived same-day TWC daily high vs Kalshi/TWC settled high. Each TWC forecast comes from a separate historical snapshot.",
     }, { headers: { "Cache-Control": "no-store, max-age=0, must-revalidate" } });
   } catch (error) {
     console.error("Weather study build failed", error);
