@@ -556,7 +556,7 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <p className={styles.trajectoryNote}>
-        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} Frozen TWC is preserved as the pre-day study benchmark. Latest TWC is the provider's newest hourly curve. METAR is observed reality. The adaptive line applies the live METAR residual to the latest TWC future; it does not alter or backfill either TWC curve. Calendar-day highs are shown separately because TWC's daily-high product can differ from the maximum value in its hourly path.
+        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} Frozen TWC is preserved as the pre-day study benchmark. Latest TWC is the provider’s newest hourly curve. METAR is observed reality. The adaptive line applies the live METAR residual to the latest TWC future; it does not alter or backfill either TWC curve. Calendar-day highs are shown separately because TWC’s daily-high product can differ from the maximum value in its hourly path.
       </p>
     </section>
   );
