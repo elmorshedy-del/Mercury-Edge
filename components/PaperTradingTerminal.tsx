@@ -2,6 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import styles from "./PaperTradingTerminal.module.css";
 
 type Portfolio = {
@@ -238,7 +239,7 @@ export function PaperTradingTerminal() {
   );
   const takenTrades = useMemo(
     () => (executions?.trades ?? []).filter((trade) => !selected?.modeCode || trade.modeCode === selected.modeCode).slice(0, 50),
-    [executions, selected?.modeCode],
+    [executions, selected],
   );
 
   const openSignals = live?.signals.filter((signal) => signal.status === "open_gap").length ?? 0;
@@ -248,17 +249,17 @@ export function PaperTradingTerminal() {
     <section className={styles.terminal}>
       <header className={styles.topbar}>
         <div className={styles.brandBlock}>
-          <a href="/" className={styles.brand}>
+          <Link href="/" className={styles.brand}>
             <span className={styles.logoMark}>M</span>
             <span><b>Mercury Edge</b><small>Paper Terminal</small></span>
-          </a>
+          </Link>
           <span className={styles.paperBadge}>PAPER</span>
         </div>
         <div className={styles.topStatus}>
           <span className={styles.liveStatus}><i />{error ? "FEED ISSUE" : "LIVE"}</span>
           <span>Session {config?.latestSession?.status ?? "waiting"}</span>
           <span>{live ? age(live.generatedAt, now) : "connecting"}</span>
-          <a href="/" className={styles.researchLink}>Research ↗</a>
+          <Link href="/" className={styles.researchLink}>Research ↗</Link>
         </div>
       </header>
 
