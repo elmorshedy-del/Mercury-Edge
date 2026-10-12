@@ -1,0 +1,31 @@
+name: Weather Study Checks
+
+on:
+  pull_request:
+    paths:
+      - 'app/api/weather-dashboard/study/**'
+      - 'components/WeatherStudyTable.*'
+      - '.github/workflows/weather-study-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'app/api/weather-dashboard/study/**'
+      - 'components/WeatherStudyTable.*'
+      - '.github/workflows/weather-study-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  study-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - run: npm ci
+      - run: npx eslint app/api/weather-dashboard/study/route.ts components/WeatherStudyTable.tsx
+      - run: npm test
+      - run: npm run build

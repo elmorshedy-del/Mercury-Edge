@@ -6,11 +6,16 @@ import styles from "@/components/WeatherStudyTable.module.css";
 type StudyValue = {
   date: string;
   forecastHigh: number | null;
+  laterForecastHigh: number | null;
   realizedHigh: number | null;
   error: number | null;
+  laterError: number | null;
   hit: boolean | null;
+  laterHit: boolean | null;
   forecastCapturedAt: string | null;
   forecastProvenance: string | null;
+  laterForecastCapturedAt: string | null;
+  laterForecastProvenance: string | null;
   eventTicker: string | null;
   winningBucket: {
     ticker: string;
@@ -26,8 +31,13 @@ type StudyRow = {
   city: string;
   values: StudyValue[];
   mae: number | null;
+  maeCount: number;
+  laterMae: number | null;
+  laterMaeCount: number;
   hits: number;
   hitTotal: number;
+  laterHits: number;
+  laterHitTotal: number;
 };
 
 type StudyPayload = {
@@ -54,11 +64,19 @@ function errorText(value: number | null) {
   return value > 0 ? `+${rounded}` : rounded;
 }
 
-function cellText(value: StudyValue | undefined) {
+function forecastError(value: number | null) {
+  return value === null ? "" : ` (error ${errorText(value)}°)`;
+}
+
+function cellContent(value: StudyValue | undefined) {
   if (!value) return "—";
-  if (value.forecastHigh === null) return "No frozen TWC";
-  if (!value.settled || value.realizedHigh === null) return `${degree(value.forecastHigh)} → pending`;
-  return `${degree(value.forecastHigh)} → ${degree(value.realizedHigh)} (${errorText(value.error)})`;
+  return (
+    <div className={styles.forecastCell}>
+      <div className={styles.forecastLine}><span>Frozen TWC</span><b>{degree(value.forecastHigh)}{forecastError(value.error)}</b></div>
+      <div className={styles.forecastLine}><span>Later TWC</span><b>{degree(value.laterForecastHigh)}{forecastError(value.laterError)}</b></div>
+      <div className={styles.actualLine}><span>Settled high</span><b>{value.settled ? degree(value.realizedHigh) : "Pending"}</b></div>
+    </div>
+  );
 }
 
 function capturedTitle(value: StudyValue | undefined) {
@@ -66,6 +84,8 @@ function capturedTitle(value: StudyValue | undefined) {
   const parts = [
     value.forecastCapturedAt ? `Frozen TWC captured ${new Date(value.forecastCapturedAt).toLocaleString()}` : null,
     value.forecastProvenance,
+    value.laterForecastCapturedAt ? `Later TWC captured ${new Date(value.laterForecastCapturedAt).toLocaleString()}` : "No later same-day TWC high archived",
+    value.laterForecastProvenance,
     value.winningBucket ? `Winning bucket: ${value.winningBucket.label}` : null,
     value.eventTicker,
   ].filter(Boolean);
@@ -113,11 +133,11 @@ export function WeatherStudyTable() {
       <header className={styles.header}>
         <div>
           <span>Calibration study</span>
-          <h2>TWC forecast high vs realized daily high</h2>
+          <h2>Frozen vs later TWC high · settlement</h2>
           <p>
             {data?.dates?.length
-              ? `${shortDate(data.dates[0])}–${shortDate(data.dates[data.dates.length - 1])} · all ${data.dates.length} completed recorded market days; frozen forecast on the left, realized settlement high on the right, forecast error in parentheses.`
-              : "All completed recorded market days · frozen forecast on the left, realized settlement high on the right, forecast error in parentheses."}
+              ? `${shortDate(data.dates[0])}–${shortDate(data.dates[data.dates.length - 1])} · ${data.dates.length} completed market days · original frozen forecast, one last archived same-day forecast, and actual settlement high.`
+              : "Completed market days · original frozen forecast, one last archived same-day forecast, and actual settlement high."}
           </p>
         </div>
         <div className={styles.legend}><b>MAE</b><span>Mean absolute error</span></div>
@@ -134,7 +154,7 @@ export function WeatherStudyTable() {
                 <tr>
                   <th>City</th>
                   {data.dates.map((date) => <th key={date}>{shortDate(date)}</th>)}
-                  <th>Recorded-day MAE</th>
+                  <th>Forecast MAE</th>
                   <th>Winning-bucket hits</th>
                 </tr>
               </thead>
@@ -144,10 +164,16 @@ export function WeatherStudyTable() {
                     <td><b>{row.city}</b></td>
                     {data.dates.map((date) => {
                       const value = row.values[dateMap.get(date) ?? -1];
-                      return <td key={date} title={capturedTitle(value)}>{cellText(value)}</td>;
+                      return <td key={date} title={capturedTitle(value)}>{cellContent(value)}</td>;
                     })}
-                    <td className={styles.mae}>{row.mae === null ? "—" : `${row.mae.toFixed(2)}°F`}</td>
-                    <td><span className={styles.hit}>{row.hitTotal ? `${row.hits}/${row.hitTotal}` : "—"}</span></td>
+                    <td className={styles.mae}>
+                      <div className={styles.metricLine}><span>Frozen</span><b>{row.mae === null ? "—" : `${row.mae.toFixed(2)}°F`}</b><small>n={row.maeCount}</small></div>
+                      <div className={styles.metricLine}><span>Later</span><b>{row.laterMae === null ? "—" : `${row.laterMae.toFixed(2)}°F`}</b><small>n={row.laterMaeCount}</small></div>
+                    </td>
+                    <td>
+                      <div className={styles.metricLine}><span>Frozen</span><span className={styles.hit}>{row.hitTotal ? `${row.hits}/${row.hitTotal}` : "—"}</span></div>
+                      <div className={styles.metricLine}><span>Later</span><span className={styles.hit}>{row.laterHitTotal ? `${row.laterHits}/${row.laterHitTotal}` : "—"}</span></div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -155,7 +181,7 @@ export function WeatherStudyTable() {
           </div>
 
           <p className={styles.note}>
-            Error sign = TWC frozen calendar-day high − realized Kalshi/TWC settlement high. “Winning-bucket hit” means the frozen TWC high itself falls inside the bucket that settled YES. The study starts at Mercury’s first recorded TWC baseline and keeps every completed day permanently. New dates append automatically after the Pacific calendar day closes; incomplete or unavailable cells are shown explicitly instead of being filled from a later forecast.
+            Error sign = forecast high − realized Kalshi/TWC settlement high, for each TWC version separately. The later TWC value is the last archived same-day daily-high forecast (not a settlement reading), with its capture time shown when you tap/hover a cell. Each MAE uses available settled days; the n counts show coverage if the two samples differ. A winning-bucket hit means that forecast falls inside the bucket that settled YES. Missing snapshots remain blank rather than being invented from later days. New days append automatically after the Pacific day closes.
           </p>
         </>
       )}
