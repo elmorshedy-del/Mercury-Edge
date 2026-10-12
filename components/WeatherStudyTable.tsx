@@ -185,7 +185,7 @@ export function WeatherStudyTable() {
           </div>
 
           <p className={styles.note}>
-            Frozen = latest valid pre-midnight forecast; Later = last archived TWC calendar-day-high forecast on that city's local target day (timestamp on hover); Realized = settlement high. Revision = Later − Frozen. Both forecast errors = forecast − realized. Bucket hits and MAE are shown separately for frozen and later forecasts, with potentially different sample sizes when a snapshot is missing. Later is retrospective, not a pre-day trading signal. Missing forecasts stay blank; dates continue to append after the Pacific day closes.
+            Frozen = latest valid pre-midnight forecast; Later = last archived TWC calendar-day-high forecast on that city’s local target day (timestamp on hover); Realized = settlement high. Revision = Later − Frozen. Both forecast errors = forecast − realized. Bucket hits and MAE are shown separately for frozen and later forecasts, with potentially different sample sizes when a snapshot is missing. Later is retrospective, not a pre-day trading signal. Missing forecasts stay blank; dates continue to append after the Pacific day closes.
           </p>
         </>
       )}
