@@ -495,6 +495,11 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
   const latestResidualPoint = model.residuals.length ? model.residuals[model.residuals.length - 1] : null;
   const adaptive = plottedProjected.length && latestResidualPoint ? [{ minute: latestResidualPoint.minute, temp: latestResidualPoint.temp }, ...plottedProjected] : plottedProjected;
   const middleTick = Math.round((yMin + yMax) / 2);
+  const currentStart = daytimeCurrent[0] ?? null;
+  const frozenPeak = model.frozenHourlyPeak;
+  const currentPeak = model.currentHourlyPeak;
+  const peakLabelX = (minute: number) => minute > 17 * 60 ? x(minute) - 7 : x(minute) + 7;
+  const peakLabelAnchor = (minute: number): "start" | "end" => minute > 17 * 60 ? "end" : "start";
 
   return (
     <section className={styles.trajectoryBlock}>
@@ -510,12 +515,12 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
         <div>
           <span>Frozen TWC calendar high</span>
           <b>{frozen.forecastHigh !== null ? `${frozen.forecastHigh.toFixed(0)}°F` : "—"}</b>
-          <small>{shortTimeLabel(frozen.capturedAt, station.timezone)} · hourly path {model.frozenHourlyPeak.temp.toFixed(0)}°</small>
+          <small>{shortTimeLabel(frozen.capturedAt, station.timezone)} · hourly path peak {model.frozenHourlyPeak.temp.toFixed(0)}°</small>
         </div>
         <div>
           <span>Latest TWC calendar high</span>
           <b>{current.forecastHigh !== null ? `${current.forecastHigh.toFixed(0)}°F` : "—"}</b>
-          <small>{shortTimeLabel(current.capturedAt, station.timezone)} · hourly path {model.currentHourlyPeak.temp.toFixed(0)}°</small>
+          <small>{shortTimeLabel(current.capturedAt, station.timezone)} · hourly path peak {model.currentHourlyPeak.temp.toFixed(0)}°{currentStart ? ` · starts ${clockLabel(currentStart.minute)}` : ""}</small>
         </div>
         <div>
           <span>METAR max so far</span>
@@ -530,11 +535,15 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
       </div>
 
       <div className={styles.trajectoryLegend}>
-        <span><i className={styles.legendFrozen} />Frozen TWC · {shortTimeLabel(frozen.capturedAt, station.timezone)}</span>
-        <span><i className={styles.legendCurrent} />Latest TWC · {shortTimeLabel(current.capturedAt, station.timezone)}</span>
+        <span><i className={styles.legendFrozen} />Frozen hourly path · {shortTimeLabel(frozen.capturedAt, station.timezone)}</span>
+        <span><i className={styles.legendCurrent} />Latest hourly path · {shortTimeLabel(current.capturedAt, station.timezone)}</span>
         <span><i className={styles.legendObserved} />METAR observations</span>
         <span><i className={styles.legendAdaptive} />Adaptive = latest TWC + METAR bias</span>
         <span>{model.mechanism.label}</span>
+      </div>
+      <div className={styles.trajectoryCaption}>
+        <b>Two different TWC products:</b> the 70°/71° cards are calendar-day high forecasts. The gray and blue curves are hourly forecasts, so their peaks can be a degree different. Dotted horizontal guides show the calendar-day highs.
+        {currentStart ? ` The latest hourly curve only begins at ${clockLabel(currentStart.minute)} because earlier hours are already in the past.` : ""}
       </div>
 
       <div className={styles.chartScroll}>
@@ -546,17 +555,51 @@ function AdaptiveTrajectory({ station }: { station: Station }) {
             </g>
           ))}
           {ticks.map((hour) => <text key={hour} x={x(hour * 60)} y={height - 10} textAnchor="middle" className={styles.axisText}>{hour > 12 ? hour - 12 : hour}{hour >= 12 ? "p" : "a"}</text>)}
+
+          {frozen.forecastHigh !== null && (
+            <g>
+              <line x1={pad.left} x2={width - pad.right} y1={y(frozen.forecastHigh)} y2={y(frozen.forecastHigh)} className={styles.calendarFrozenGuide} />
+              <text x={width - pad.right - 4} y={y(frozen.forecastHigh) + 11} textAnchor="end" className={styles.calendarFrozenLabel}>
+                Frozen daily high {frozen.forecastHigh.toFixed(0)}°
+              </text>
+            </g>
+          )}
+          {current.forecastHigh !== null && (
+            <g>
+              <line x1={pad.left} x2={width - pad.right} y1={y(current.forecastHigh)} y2={y(current.forecastHigh)} className={styles.calendarCurrentGuide} />
+              <text x={width - pad.right - 4} y={y(current.forecastHigh) - 5} textAnchor="end" className={styles.calendarCurrentLabel}>
+                Latest daily high {current.forecastHigh.toFixed(0)}°
+              </text>
+            </g>
+          )}
+          {currentStart && currentStart.minute > xMin && (
+            <g>
+              <line x1={x(currentStart.minute)} x2={x(currentStart.minute)} y1={pad.top} y2={height - pad.bottom} className={styles.currentStartGuide} />
+              <text x={x(currentStart.minute) + 5} y={pad.top + 11} className={styles.currentStartLabel}>Latest path starts here</text>
+            </g>
+          )}
+
           <polyline points={line(daytimeFrozen)} className={styles.frozenLine} />
           <polyline points={line(daytimeCurrent)} className={styles.currentLine} />
           {plottedObserved.length > 1 && <polyline points={line(plottedObserved)} className={styles.observedLine} />}
           {adaptive.length > 1 && <polyline points={line(adaptive)} className={styles.adaptiveLine} />}
+
+          <circle cx={x(frozenPeak.minute)} cy={y(frozenPeak.temp)} r="4" className={styles.frozenPeakDot} />
+          <text x={peakLabelX(frozenPeak.minute)} y={y(frozenPeak.temp) + 14} textAnchor={peakLabelAnchor(frozenPeak.minute)} className={styles.peakLabel}>
+            Frozen hourly peak {frozenPeak.temp.toFixed(0)}°
+          </text>
+          <circle cx={x(currentPeak.minute)} cy={y(currentPeak.temp)} r="4.5" className={styles.currentPeakDot} />
+          <text x={peakLabelX(currentPeak.minute)} y={y(currentPeak.temp) - 9} textAnchor={peakLabelAnchor(currentPeak.minute)} className={styles.peakLabel}>
+            Latest hourly peak {currentPeak.temp.toFixed(0)}°
+          </text>
+
           {plottedObserved.map((point) => <circle key={`o-${point.minute}`} cx={x(point.minute)} cy={y(point.temp)} r="4" className={styles.observedDot} />)}
           {plottedProjected.map((point) => <circle key={`f-${point.minute}`} cx={x(point.minute)} cy={y(point.temp)} r="3.5" className={styles.adaptiveDot} />)}
         </svg>
       </div>
 
       <p className={styles.trajectoryNote}>
-        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} Frozen TWC is preserved as the pre-day study benchmark. Latest TWC is the provider’s newest hourly curve. METAR is observed reality. The adaptive line applies the live METAR residual to the latest TWC future; it does not alter or backfill either TWC curve. Calendar-day highs are shown separately because TWC’s daily-high product can differ from the maximum value in its hourly path.
+        <b>{model.mechanism.label}:</b> {model.mechanism.detail}{model.mechanism.evidence.length ? ` Evidence: ${model.mechanism.evidence.join(" · ")}.` : ""} Frozen TWC is preserved as the pre-day study benchmark. Latest TWC is the provider’s newest hourly curve. METAR is observed reality. The adaptive line applies the live METAR residual to the latest TWC future; it does not alter or backfill either TWC curve. The horizontal daily-high guides come from TWC’s separate calendar-day-high product; they are not supposed to be identical to the maximum point of the hourly curve.
       </p>
     </section>
   );
