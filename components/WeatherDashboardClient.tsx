@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import styles from "@/app/weather-dashboard/weather-dashboard.module.css";
+import { SolarHeatingGauge } from "./SolarHeatingGauge";
 
 type WeatherRow = {
   time: string;
@@ -630,6 +631,7 @@ function StationCard({ station }: { station: Station }) {
       </section>
 
       {station.latest?.raw && <details className={styles.latestRaw}><summary>Latest raw report</summary><code>{station.latest.raw}</code></details>}
+      <SolarHeatingGauge stid={station.stid} city={station.city} key={station.stid} />
       <AdaptiveTrajectory station={station} />
 
       <section className={styles.sectionBlock}>

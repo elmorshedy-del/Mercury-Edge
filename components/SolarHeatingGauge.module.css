@@ -1,0 +1,89 @@
+.panel { margin: 20px 26px; padding: 26px; border: 1px solid #d8e5e3; border-radius: 23px; background: radial-gradient(ellipse at 17% 21%,#fff5d9a6,transparent 55%),linear-gradient(130deg,#fbfdfb,#eef5f3); color: #193a30; box-shadow: 0 8px 28px #234b3910; }
+.header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.eyebrow { font-size: 10px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; color: #637b6a; }
+.header h3 { font-size: 22px; margin: 5px 0 0; letter-spacing: -.03em; }
+.badge { border: 1px solid #cbd8cd; background: #fff9; border-radius: 30px; padding: 6px 10px; font-size: 11px; white-space: nowrap; }
+.readout { display: flex; align-items: center; gap: 26px; margin: 18px 0; }
+.dial { width: 200px; flex-shrink: 0; }
+.dial svg { display: block; width: 100%; overflow: visible; }
+.track,.fill { fill: none; stroke-width: 12; stroke-linecap: round; }
+.track { stroke: #dce5d9; }
+.fill { stroke: #c29c39; transition: stroke-dasharray .5s; }
+.dialNumber { fill: #17382e; font-size: 27px; font-weight: 750; }
+.dialUnit { fill: #657568; font-size: 12px; }
+.dialTick { fill: #657568; font-size: 10px; }
+.explanation strong { display: block; font-size: 21px; letter-spacing: -.02em; }
+.explanation p { margin: 8px 0; font-size: 14px; line-height: 1.55; color: #4f6558; max-width: 510px; }
+.trend { display: inline-block; margin-top: 5px; font-size: 12px; font-weight: 650; color: #456a44; }
+.bands { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin: 17px 0; font-size: 10px; color: #536454; }
+.bands b { display: block; font-size: 12px; margin-bottom: 5px; }
+.bands span { padding: 8px 3px; border-top: 3px solid #ced8cb; text-align: center; }
+.bands span:nth-child(1) { border-color: #8995af; }
+.bands span:nth-child(2) { border-color: #67a6b3; }
+.bands span:nth-child(3) { border-color: #c8b16c; }
+.bands span:nth-child(4) { border-color: #ec9250; }
+.comparison { background: #ffffff9c; border: 1px solid #e0e6db; border-radius: 12px; padding: 13px 15px; }
+.comparison > div:first-child { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.comparison b { font-size: 12px; }
+.ratioTrack { height: 7px; background: #e0e7dd; border-radius: 10px; margin: 10px 0 7px; overflow: hidden; }
+.ratioTrack i { display: block; height: 100%; border-radius: inherit; background: #819e6c; }
+.comparison small { font-size: 11px; color: #60725f; }
+.meta { display: flex; justify-content: space-between; gap: 9px; flex-wrap: wrap; margin: 13px 0 0; color: #6f7b70; font-size: 10px; }
+.details { margin-top: 13px; font-size: 12px; line-height: 1.6; border-top: 1px solid #dbe3d5; padding-top: 12px; }
+.details summary { cursor: pointer; color: #506750; font-weight: 650; }
+.details p { color: #617260; margin: 12px 0; }
+.links { display: flex; gap: 14px; flex-wrap: wrap; }
+.links a { color: #326852; text-underline-offset: 3px; }
+.feedWarning { color: #875a20; font-size: 11px; }
+.panel[data-tone="rising"] .fill { stroke: #cc9b20; }
+.panel[data-tone="falling"] .fill { stroke: #8ba2ad; }
+.panel[data-tone="quiet"] { background: radial-gradient(ellipse at 10% 10%,#e5edf6,transparent 60%),linear-gradient(130deg,#f8fafc,#eef5f3); color: #52645b; }
+.panel[data-tone="quiet"] .dialNumber { fill: #65766d; }
+.timeline { margin-top: 24px; border-top: 1px solid #d9e5e3; padding-top: 22px; }
+.timelineHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.timelineHeader h4 { font-size: 18px; margin: 5px 0 0; letter-spacing: -.025em; }
+.switcher { display: flex; background: #e3ece9; padding: 3px; border-radius: 20px; }
+.switcher button,.metricTabs button { border: 0; color: #657c77; background: transparent; padding: 6px 12px; border-radius: 18px; font-size: 11px; cursor: pointer; }
+.switcher button[aria-pressed="true"] { background: #fff; color: #234c4b; box-shadow: 0 2px 5px #173e3710; }
+.timelineTools { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin: 14px 0 5px; }
+.timelineTools > span { color: #78908a; font-size: 10px; }
+.metricTabs { display: flex; gap: 4px; }
+.metricTabs button { border: 1px solid #d5e0dc; }
+.metricTabs button[aria-pressed="true"] { background: #264f50; color: #fff; border-color: #264f50; }
+.chart { display: block; width: 100%; overflow: visible; touch-action: pan-y; cursor: crosshair; margin-top: 14px; }
+.axis { font-size: 11px; fill: #82938c; }
+.legend { display: flex; justify-content: center; gap: 20px; font-size: 10px; color: #6c7f76; }
+.legend span { display: flex; align-items: center; gap: 6px; }
+.legendMeasured { display: inline-block; width: 16px; height: 3px; background: linear-gradient(90deg,#67a6b3,#ec9250); border-radius: 3px; }
+.legendReference { display: inline-block; width: 16px; border-top: 2px dashed #a99b76; }
+.scrubber { display: flex; align-items: center; gap: 14px; margin: 18px 0 12px; color: #6c8077; font-size: 10px; }
+.scrubber span { white-space: nowrap; }
+.scrubber input { width: 100%; accent-color: #386568; height: 16px; cursor: pointer; }
+.scanDetail { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 11px 14px; border-radius: 12px; background: #fff9; border: 1px solid #dde8e2; font-size: 11px; color: #627970; }
+.scanDetail b { color: #244d45; }
+.scanDetail button { background: #264f50; color: white; border: 0; border-radius: 20px; padding: 7px 11px; font-size: 10px; cursor: pointer; }
+.timelineHint { font-size: 11px; color: #6f8379; line-height: 1.65; margin: 12px 0 0; }
+.historyEmpty { background: #ffffff70; border: 1px dashed #ccdcda; border-radius: 12px; color: #71837c; margin: 15px 0; padding: 23px; font-size: 12px; line-height: 1.6; }
+.delivery { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 12px; color: #738b80; font-size: 10px; }
+.deliveryDot { width: 5px; height: 5px; background: #789b87; border-radius: 50%; }
+button:focus-visible,input:focus-visible { outline: 2px solid #436d73; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+@media (max-width: 650px) {
+  .panel { margin: 18px 16px; padding: 17px; }
+  .header h3 { font-size: 20px; }
+  .readout { gap: 14px; }
+  .dial { width: 132px; }
+  .explanation strong { font-size: 18px; }
+  .explanation p { font-size: 12px; }
+  .trend { font-size: 11px; }
+  .bands { font-size: 9px; gap: 4px; }
+  .bands b { font-size: 11px; }
+  .timelineHeader h4 { font-size: 16px; }
+  .axis { font-size: 14px; }
+  .timelineHint { font-size: 10px; }
+  .timelineTools > span { display: none; }
+}
+@media (max-width: 390px) {
+  .readout { flex-direction: column; align-items: flex-start; }
+  .dial { width: 170px; align-self: center; }
+}
