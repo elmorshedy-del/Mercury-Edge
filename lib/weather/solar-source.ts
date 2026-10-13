@@ -182,7 +182,7 @@ async function downloadAndRead(satellite: number, object: SolarObject): Promise<
 }
 async function refresh(satellite: number, now: Date): Promise<void> {
   const prior = feedCache.get(satellite);
-  if (prior && +now - prior.checkedAt < 10000) return;
+  if (prior && +now - prior.checkedAt < 5000) return;
   if (inFlight.has(satellite)) return inFlight.get(satellite);
   const promise = (async () => {
     try {
