@@ -87,3 +87,24 @@ button:focus-visible,input:focus-visible { outline: 2px solid #436d73; outline-o
   .readout { flex-direction: column; align-items: flex-start; }
   .dial { width: 170px; align-self: center; }
 }
+.forecastCard { margin-top: 20px; padding: 18px; border: 1px solid #d8e3de; border-radius: 17px; background: #ffffffae; }
+.forecastCard[data-surprise="less"] { background: linear-gradient(125deg,#eaf3fb,#f7fbfa); border-color:#ccdfed; }
+.forecastCard[data-surprise="more"] { background: linear-gradient(125deg,#fff0dd,#fffaf3); border-color:#efd8b6; }
+.forecastHeader { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.modelTag { color:#67588c; background:#eeebf7; padding:4px 8px; border-radius:12px; font-size:10px; font-weight:650; }
+.forecastCard h4 { margin:12px 0 7px; font-size:20px; letter-spacing:-.025em; }
+.forecastCard p { font-size:12px; line-height:1.55; color:#526b60; margin:0 0 14px; max-width:720px; }
+.surpriseTrack { position:relative; height:10px; margin:20px 5px 8px; background:linear-gradient(90deg,#6697be,#d9e6ec 38%,#e3e8e2 50%,#ede1cc 62%,#e8a26b); border-radius:20px; }
+.surpriseTrack > i { display:block; position:absolute; top:50%; transform:translate(-50%,-50%); width:15px; height:15px; border:3px solid white; border-radius:50%; background:#294a47; box-shadow:0 1px 5px #22463940; }
+.surpriseCenter { position:absolute; left:50%; top:-4px; height:18px; width:1px; background:#729084; }
+.surpriseLabels { display:flex; justify-content:space-between; color:#657d73; font-size:10px; }
+.forecastNumbers { display:flex; gap:15px; flex-wrap:wrap; margin-top:16px; font-size:12px; color:#637b70; }
+.forecastNumbers b { color:#284d43; }
+.gapShift { color:#48675d; font-size:11px; line-height:1.5; margin-top:12px; }
+.forecastProvenance { font-size:10px; color:#6d8178; line-height:1.5; margin-top:15px; }
+.forecastCaveat { display:block; color:#7c8980; font-size:10px; line-height:1.5; margin-top:7px; }
+.legendForecast { display:inline-block; width:16px; border-top:2px dashed #6654a2; }
+.legend { flex-wrap:wrap; gap:10px 16px; }
+.clearToggle { display:flex; align-items:center; gap:5px; font-size:10px; color:#74897f; cursor:pointer; }
+.clearToggle input { accent-color:#a99b76; }
+@media(max-width:650px) { .forecastCard {padding:14px;} .forecastCard h4 {font-size:18px;} .forecastNumbers {gap:9px;font-size:11px;} .metricTabs {flex-wrap:wrap;} .metricTabs button {padding:6px 9px;font-size:10px;} }
